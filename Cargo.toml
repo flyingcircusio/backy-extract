@@ -1,0 +1,34 @@
+[package]
+name = "backy-extract"
+version = "0.1.0"
+authors = ["Christian Kauhaus <kc@flyingcircus.io>"]
+edition = "2018"
+description = "Rapid restore tool for backy"
+license = "BSD-3-Clause"
+
+[dependencies]
+atty = "0.2"
+byteorder = "1.2"
+clap = "2.30"
+console = "0.7"
+crossbeam = "0.6"
+failure = "0.1"
+fs2 = "0.4"
+indicatif = "0.11"
+lazy_static = "1.2"
+memmap = "0.7"
+minilzo = "0.2"
+num_cpus = "1.9"
+parking_lot = "0.7"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+
+[dev-dependencies]
+flate2 = "1.0"
+tar = "0.4"
+tempdir = "0.3"
+
+[profile.release]
+debug = true
+panic = "abort"
