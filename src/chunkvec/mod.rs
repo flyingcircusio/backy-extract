@@ -1,7 +1,7 @@
 mod backend;
 
-use super::{CompressedChunk, ExtractError, RawChunk, CHUNKSIZE};
-use crossbeam::channel::{Receiver, Sender};
+use super::{ExtractError, RawChunk, CHUNKSIZE};
+use crossbeam::channel::Sender;
 use failure::{format_err, Fallible, ResultExt};
 use num_cpus;
 use serde_derive::Deserialize;
@@ -57,40 +57,45 @@ impl<'d> ChunkVec<'d> {
         })
     }
 
+    /// Number of chunks to restore
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.id.len()
+    }
+
     #[allow(clippy::needless_pass_by_value)]
-    pub fn read(&self, comp: Sender<CompressedChunk>, uncomp: Sender<RawChunk>) -> Fallible<()> {
+    pub fn read(
+        &self,
+        idx: Box<dyn Iterator<Item = usize>>,
+        uncomp: Sender<RawChunk>,
+    ) -> Fallible<()> {
         backend::check(&self.dir).context("Invalid `store' version tag")?;
-        for (seq, f) in self.id.iter().enumerate() {
-            match f {
-                Some(id) => comp.send(CompressedChunk {
+        for seq in idx {
+            let c = self.id[seq];
+            uncomp
+                .send(RawChunk {
                     seq,
-                    data: backend::load(&self.dir, id)?,
-                })?,
-                None => uncomp.send(RawChunk { seq, data: None })?,
-            };
+                    data: match c {
+                        Some(id) => Some(self.decompress(seq, &backend::load(&self.dir, id)?)?),
+                        None => None,
+                    },
+                })
+                .context("Failed to send chunk to writer")?;
         }
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn decompress(&self, rx: Receiver<CompressedChunk>, out: Sender<RawChunk>) -> Fallible<()> {
-        for c in rx {
-            let uncomp = backend::decompress(&c.data)
-                .with_context(|_| format_err!("Failed to decompress {}", self.fmt_chunk(c.seq)))?;
-            if uncomp.len() != CHUNKSIZE as usize {
-                return Err(ExtractError::BackupFormat(format!(
-                    "uncompressed {} has wrong length",
-                    self.fmt_chunk(c.seq)
-                ))
-                .into());
-            }
-            out.send(RawChunk {
-                seq: c.seq,
-                data: Some(uncomp),
-            })
-            .context("Failed to send decompressed chunk")?;
+    fn decompress(&self, seq: usize, compressed: &[u8]) -> Fallible<Vec<u8>> {
+        let uncomp = backend::decompress(compressed)
+            .with_context(|_| format_err!("Failed to decompress {}", self.fmt_chunk(seq)))?;
+        if uncomp.len() != CHUNKSIZE as usize {
+            return Err(ExtractError::BackupFormat(format!(
+                "uncompressed {} has wrong length",
+                self.fmt_chunk(seq)
+            ))
+            .into());
         }
-        Ok(())
+        Ok(uncomp)
     }
 
     fn fmt_chunk(&self, seq: usize) -> String {
@@ -107,7 +112,6 @@ mod tests {
 
     #[test]
     fn check_backend_store() {
-        let (comp_tx, _) = unbounded();
         let (raw_tx, _) = unbounded();
         let tmp = TempDir::new("check_backend_store").expect("create tempdir");
         let cv = ChunkVec::decode(r#"{"mapping": {}, "size": 0}"#, &tmp.path())
@@ -115,14 +119,14 @@ mod tests {
 
         // (1) no `store' file at all
         fs::create_dir(tmp.path().join("chunks")).unwrap();
-        assert!(cv.read(comp_tx.clone(), raw_tx.clone()).is_err());
+        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_err());
 
         // (2) wrong contents
         fs::write(tmp.path().join("chunks/store"), b"v1").unwrap();
-        assert!(cv.read(comp_tx.clone(), raw_tx.clone()).is_err());
+        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_err());
 
         // (3) acceptable contents
         fs::write(tmp.path().join("chunks/store"), b"v2").unwrap();
-        assert!(cv.read(comp_tx.clone(), raw_tx.clone()).is_ok())
+        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_ok())
     }
 }

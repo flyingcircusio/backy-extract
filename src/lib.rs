@@ -154,29 +154,25 @@ impl Extractor {
             .println(format!("{} Loading chunk map", step(1)));
         let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
         self.print_decompress(chunks.id.len());
-        let (status, status_rx) = unbounded();
-        let (prog_tx, prog_rx) = unbounded();
-        writer.configure(chunks.size, self.threads, prog_tx);
+        let (res, res_rx) = unbounded();
+        let (progress, progress_rx) = unbounded();
+        writer.configure(chunks.size, self.threads, progress);
         let name = writer.name();
         let total_bytes = thread::scope(|s| {
-            let (comp_tx, comp_rx) = bounded(self.threads as usize);
-            let (raw_tx, raw_rx) = bounded(self.threads as usize);
-            for _ in 0..self.threads {
-                let comp_rx = comp_rx.clone();
-                let raw_tx = raw_tx.clone();
-                s.spawn(|_| status.send(chunks.decompress(comp_rx, raw_tx)));
+            let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
+            for t in 0..self.threads {
+                let idx_iter = ((t as usize)..chunks.len()).step_by(self.threads as usize);
+                let chunk_tx = chunk_tx.clone();
+                s.spawn(|_| res.send(chunks.read(Box::new(idx_iter), chunk_tx)));
             }
-            drop(comp_rx);
-            s.spawn(|_| status.send(chunks.read(comp_tx, raw_tx)));
-            s.spawn(|_| status.send(writer.receive(raw_rx)));
-            s.spawn(|_| self.print_progress(chunks.size, &name, prog_rx))
-                .join()
-                .expect("thread panic")
+            drop(chunk_tx);
+            s.spawn(|_| res.send(writer.receive(chunk_rx)));
+            self.print_progress(chunks.size, &name, progress_rx)
         })
         .expect("subthread panic");
-        drop(status);
+        drop(res);
         self.print_finished(total_bytes, start);
-        status_rx.iter().collect()
+        res_rx.iter().collect()
     }
 }
 

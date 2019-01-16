@@ -31,7 +31,6 @@ pub fn load(dir: &Path, id: &str) -> Fallible<Vec<u8>> {
 
 pub fn decompress(comp: &[u8]) -> Result<Vec<u8>, DecompressError> {
     if comp[0..5] != MAGIC[..] {
-        eprintln!("act={:?}, exp={:?}", &comp[0..5], &MAGIC[..]);
         return Err(DecompressError::Magic);
     }
     // skip 5 header bytes
