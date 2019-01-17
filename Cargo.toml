@@ -26,6 +26,7 @@ serde_json = "1"
 
 [dev-dependencies]
 flate2 = "1.0"
+galvanic-assert = "0.8"
 tar = "0.4"
 tempdir = "0.3"
 

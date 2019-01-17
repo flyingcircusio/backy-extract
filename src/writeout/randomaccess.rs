@@ -31,39 +31,50 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
     Ok(())
 }
 
-fn write_data_continuous(f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-    write_all_at(f, data, seq as u64 * u64::from(CHUNKSIZE))
+trait Writer {
+    fn data_chunk(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
+    fn zero_chunk(&self, file: &File, pos: usize) -> io::Result<()>;
 }
 
-fn write_zero_continuous(f: &File, seq: usize) -> io::Result<()> {
-    write_all_at(f, &ZERO_CHUNK, seq as u64 * u64::from(CHUNKSIZE))
+struct Continuous;
+
+impl Writer for Continuous {
+    fn data_chunk(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+        write_all_at(f, data, seq as u64 * u64::from(CHUNKSIZE))
+    }
+
+    fn zero_chunk(&self, f: &File, seq: usize) -> io::Result<()> {
+        write_all_at(f, &ZERO_CHUNK, seq as u64 * u64::from(CHUNKSIZE))
+    }
 }
+
+struct Sparse;
 
 const BLKSIZE: usize = 16 * 1024;
 
-fn write_data_sparse(f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-    let mut pos = seq as u64 * u64::from(CHUNKSIZE);
-    for slice in data.chunks(BLKSIZE) {
-        if slice != &ZERO_CHUNK[..BLKSIZE] {
-            write_all_at(f, slice, pos)?;
+impl Writer for Sparse {
+    fn data_chunk(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+        let mut pos = seq as u64 * u64::from(CHUNKSIZE);
+        for slice in data.chunks(BLKSIZE) {
+            if slice != &ZERO_CHUNK[..BLKSIZE] {
+                write_all_at(f, slice, pos)?;
+            }
+            pos += BLKSIZE as u64;
         }
-        pos += BLKSIZE as u64;
+        Ok(())
     }
-    Ok(())
+
+    fn zero_chunk(&self, _f: &File, _seq: usize) -> io::Result<()> {
+        Ok(())
+    }
 }
 
-fn write_zero_sparse(_f: &File, _seq: usize) -> io::Result<()> {
-    Ok(())
-}
-
-#[derive(Clone)]
 pub struct RandomAccess {
     path: PathBuf,
     size: u64,
     threads: u8,
     progress: Option<Sender<u32>>,
-    write_data: fn(&File, usize, &[u8]) -> io::Result<()>,
-    write_zero: fn(&File, usize) -> io::Result<()>,
+    writer: Box<dyn Writer + Send + Sync>,
 }
 
 impl RandomAccess {
@@ -73,15 +84,10 @@ impl RandomAccess {
             size: 0,
             threads: 1,
             progress: None,
-            write_data: if sparse {
-                write_data_sparse
+            writer: if sparse {
+                Box::new(Sparse)
             } else {
-                write_data_continuous
-            },
-            write_zero: if sparse {
-                write_zero_sparse
-            } else {
-                write_zero_continuous
+                Box::new(Continuous)
             },
         }
     }
@@ -99,11 +105,11 @@ impl RandomAccess {
         Ok(f)
     }
 
-    fn run(&self, f: File, rx: Receiver<RawChunk>) -> Fallible<()> {
+    fn run(&self, f: &File, rx: Receiver<RawChunk>) -> Fallible<()> {
         for chunk in rx {
             match chunk.data {
-                Some(ref data) => (self.write_data)(&f, chunk.seq, data),
-                None => (self.write_zero)(&f, chunk.seq),
+                Some(ref data) => self.writer.data_chunk(&f, chunk.seq, data),
+                None => self.writer.zero_chunk(&f, chunk.seq),
             }
             .with_context(|_| {
                 format_err!(
@@ -128,14 +134,12 @@ impl WriteOut for RandomAccess {
     }
 
     fn receive(self, chunks: Receiver<RawChunk>) -> Fallible<()> {
-        let f = self.open()?;
+        let file = self.open()?;
         thread::scope(|s| {
             let handles: Vec<_> = (0..self.threads)
                 .map(|_| {
-                    let file = f.try_clone().expect("clone filedesc");
                     let rx = chunks.clone();
-                    let self_ = self.clone();
-                    s.spawn(move |_| self_.run(file, rx))
+                    s.spawn(|_| self.run(&file, rx))
                 })
                 .collect();
             handles

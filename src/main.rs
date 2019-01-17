@@ -48,9 +48,12 @@ fn run() -> Fallible<()> {
         )
         .arg(Arg::with_name("OUTPUT").help("Output file or block device (or stdout if absent)"))
         .get_matches();
-    let mut e = Extractor::init(m.value_of_os("REVISION").unwrap(), !m.is_present("QUIET"))?;
+    let mut e = Extractor::init(m.value_of_os("REVISION").unwrap())?;
     if let Some(t) = m.value_of("THREADS") {
         e.threads(t.parse::<u8>().context("Invalid number of threads")?);
+    }
+    if !m.is_present("QUIET") {
+        e.progress(true);
     }
     let output = m.value_of_os("OUTPUT").unwrap_or_else(|| OsStr::new("-"));
     if output.to_string_lossy() == "-" {

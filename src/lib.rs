@@ -1,5 +1,4 @@
 // TODO
-// - cache compressed chunks that occur multiple times
 // - static linkage
 mod chunkvec;
 mod writeout;
@@ -70,7 +69,7 @@ impl Extractor {
     /// The revision specification is loaded from `revfile`. The data directory is assumed to be
     /// the same directory as where revfile is located. If `show_progress` is true, a progress bar
     /// is displayed on stdout.
-    pub fn init<P: AsRef<Path>>(revfile: P, show_progress: bool) -> Fallible<Self> {
+    pub fn init<P: AsRef<Path>>(revfile: P) -> Fallible<Self> {
         let revfile = revfile.as_ref();
         let revision = fs::read_to_string(revfile)
             .context(ExtractError::LoadSpec(revfile.display().to_string()))?;
@@ -84,11 +83,7 @@ impl Extractor {
             threads: Self::default_threads(),
             basedir,
             lock,
-            progress: if show_progress {
-                ProgressBar::new(1)
-            } else {
-                ProgressBar::hidden()
-            },
+            progress: ProgressBar::hidden(),
         })
     }
 
@@ -101,6 +96,16 @@ impl Extractor {
         if n > 0 {
             self.threads = n
         }
+        self
+    }
+
+    /// Enables a nice progress bar on stderr while restoring.
+    pub fn progress(&mut self, show: bool) -> &mut Self {
+        self.progress = if show {
+            ProgressBar::new(1)
+        } else {
+            ProgressBar::hidden()
+        };
         self
     }
 
@@ -121,6 +126,8 @@ impl Extractor {
             .set_style(ProgressStyle::default_bar().template(
                 "{bytes:>9.yellow}/{total_bytes:.green} {bar:52.cyan/blue} ({elapsed}/{eta})",
             ));
+        self.progress.inc(0);
+        self.progress.set_draw_delta(total_size / 1000);
         let mut total = 0;
         for bytes in written {
             let bytes = u64::from(bytes);
@@ -153,10 +160,12 @@ impl Extractor {
         self.progress
             .println(format!("{} Loading chunk map", step(1)));
         let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
-        self.print_decompress(chunks.id.len());
+
+        self.print_decompress(chunks.len());
         let (res, res_rx) = unbounded();
         let (progress, progress_rx) = unbounded();
         writer.configure(chunks.size, self.threads, progress);
+
         let name = writer.name();
         let total_bytes = thread::scope(|s| {
             let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
@@ -170,6 +179,7 @@ impl Extractor {
             self.print_progress(chunks.size, &name, progress_rx)
         })
         .expect("subthread panic");
+
         drop(res);
         self.print_finished(total_bytes, start);
         res_rx.iter().collect()

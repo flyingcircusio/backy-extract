@@ -1,12 +1,17 @@
 mod backend;
+mod cache;
 
+use self::cache::{Cache, Entry};
 use super::{ExtractError, RawChunk, CHUNKSIZE};
+
 use crossbeam::channel::Sender;
 use failure::{format_err, Fallible, ResultExt};
 use num_cpus;
+use parking_lot::RwLock;
 use serde_derive::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // Format of the revision file as deserialized from JSON
 #[derive(Debug, Deserialize)]
@@ -39,50 +44,72 @@ pub struct ChunkVec<'d> {
     /// Total image size in bytes
     pub size: u64,
     /// Chunk file id indexed by chunk number, may contain holes
-    pub id: Vec<Option<&'d str>>,
+    ids: Vec<Option<&'d str>>,
+    /// Caches decompressed output of multiply-referenced chunks
+    cache: Arc<RwLock<Cache<'d>>>,
 }
 
 impl<'d> ChunkVec<'d> {
+    /// Parses backup spec JSON and constructs chunk map.
     pub fn decode(input: &'d str, dir: &Path) -> Fallible<Self> {
-        let rev: Revision<'_> =
-            serde_json::from_str(input).context(ExtractError::LoadSpec(input.into()))?;
+        let rev: Revision<'d> =
+            serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
         let size = rev.size;
         if size % u64::from(CHUNKSIZE) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size).into());
         }
+        let cache = Arc::new(RwLock::new(Cache::new(&rev.mapping)));
+        let ids = rev.into_vec()?;
         Ok(Self {
             dir: dir.into(),
             size,
-            id: rev.into_vec()?,
+            ids,
+            cache,
         })
     }
 
     /// Number of chunks to restore
     #[inline]
     pub fn len(&self) -> usize {
-        self.id.len()
+        self.ids.len()
     }
 
+    /// Reads chunks from disk and decompresses them. The iterator `idx` controls which chunks are
+    /// to be read. Parallel instances of `read` can be fed with disjunct sequences.
     #[allow(clippy::needless_pass_by_value)]
     pub fn read(
         &self,
         idx: Box<dyn Iterator<Item = usize>>,
-        uncomp: Sender<RawChunk>,
+        uncomp_tx: Sender<RawChunk>,
     ) -> Fallible<()> {
         backend::check(&self.dir).context("Invalid `store' version tag")?;
         for seq in idx {
-            let c = self.id[seq];
-            uncomp
+            let chunk = self.ids[seq];
+            uncomp_tx
                 .send(RawChunk {
                     seq,
-                    data: match c {
-                        Some(id) => Some(self.decompress(seq, &backend::load(&self.dir, id)?)?),
+                    data: match chunk {
+                        Some(id) => self.cached(seq, id)?,
                         None => None,
                     },
                 })
                 .context("Failed to send chunk to writer")?;
         }
         Ok(())
+    }
+
+    fn cached(&self, seq: usize, id: &'d str) -> Fallible<Option<Vec<u8>>> {
+        let lookup = self.cache.read().query(id);
+        Ok(match lookup {
+            Entry::Unknown => {
+                let data = self.decompress(seq, &backend::load(&self.dir, id)?)?;
+                self.cache.write().memoize(id, &data);
+                Some(data)
+            }
+            Entry::Known(data) => Some(data),
+            Entry::KnownZero => None,
+            Entry::Ignored => Some(self.decompress(seq, &backend::load(&self.dir, id)?)?),
+        })
     }
 
     fn decompress(&self, seq: usize, compressed: &[u8]) -> Fallible<Vec<u8>> {
@@ -99,7 +126,7 @@ impl<'d> ChunkVec<'d> {
     }
 
     fn fmt_chunk(&self, seq: usize) -> String {
-        format!("chunk #{} ({})", seq, self.id[seq].unwrap_or("n/a"))
+        format!("chunk #{} ({})", seq, self.ids[seq].unwrap_or("n/a"))
     }
 }
 

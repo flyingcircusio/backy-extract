@@ -2,7 +2,7 @@ use backy_extract::*;
 use failure::{ensure, Fallible};
 use flate2::read::GzDecoder;
 use lazy_static::lazy_static;
-use std::fs::{read, File};
+use std::fs::{read, remove_file, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Archive;
@@ -37,17 +37,16 @@ fn store_with_rev(json: &str) -> (TempDir, Extractor) {
     a.unpack(&tmp).expect("unpack store.tar");
     let rev = tmp.path().join("REV0000000000000000000");
     writeln!(File::create(&rev).unwrap(), "{}", json).expect("write revspec");
-    (tmp, Extractor::init(rev, false).expect("create extractor"))
+    (tmp, Extractor::init(rev).expect("create extractor"))
 }
 
 #[test]
 fn restore_to_stream() -> Fallible<()> {
     let store = store();
-    let mut buf = Vec::with_capacity(4 * CHUNKSIZE as usize);
-    let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"), false)?;
+    let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
     for t in &[1, 2] {
-        buf.clear();
+        let mut buf = Vec::with_capacity(4 * CHUNKSIZE as usize);
         e.threads(*t).extract(Stream::new(&mut buf))?;
         assert_eq!(buf.len(), expected.len(), "length mismatch for t={}", t);
         ensure!(buf == expected, "restored image contents mismatch");
@@ -59,9 +58,10 @@ fn restore_to_stream() -> Fallible<()> {
 fn restore_to_file() -> Fallible<()> {
     let store = store();
     let tgt = store.path().join("target_image");
-    let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"), false)?;
+    let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
     for &sparse in &[true, false] {
+        remove_file(&tgt).ok();
         e.threads(3).extract(RandomAccess::new(&tgt, sparse))?;
         ensure!(
             read(&tgt)? == expected,
