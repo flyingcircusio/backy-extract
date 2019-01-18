@@ -5,9 +5,9 @@ use self::cache::{Cache, Entry};
 use super::{ExtractError, RawChunk, CHUNKSIZE};
 
 use crossbeam::channel::Sender;
-use failure::{format_err, Fallible, ResultExt};
+use failure::{format_err, Fail, Fallible, ResultExt};
 use num_cpus;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use serde_derive::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,9 @@ pub struct ChunkVec<'d> {
     /// Chunk file id indexed by chunk number, may contain holes
     ids: Vec<Option<&'d str>>,
     /// Caches decompressed output of multiply-referenced chunks
-    cache: Arc<RwLock<Cache<'d>>>,
+    cache: Arc<Mutex<Cache<'d>>>,
+    /// Precomputed list of IDs which should be looked up in the cache (to reduce lock contention)
+    cached_ids: Vec<&'d str>,
 }
 
 impl<'d> ChunkVec<'d> {
@@ -58,13 +60,15 @@ impl<'d> ChunkVec<'d> {
         if size % u64::from(CHUNKSIZE) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size).into());
         }
-        let cache = Arc::new(RwLock::new(Cache::new(&rev.mapping)));
+        let cache = Cache::new(&rev.mapping);
+        let cached_ids = cache.interesting();
         let ids = rev.into_vec()?;
         Ok(Self {
             dir: dir.into(),
             size,
             ids,
-            cache,
+            cache: Arc::new(Mutex::new(cache)),
+            cached_ids,
         })
     }
 
@@ -99,28 +103,31 @@ impl<'d> ChunkVec<'d> {
     }
 
     fn cached(&self, seq: usize, id: &'d str) -> Fallible<Option<Vec<u8>>> {
-        let lookup = self.cache.read().query(id);
-        Ok(match lookup {
+        if !self.cached_ids.iter().any(|i| *i == id) {
+            return Ok(Some(self.load_decomp(seq, id)?));
+        }
+        let mut cache_lck = self.cache.lock();
+        Ok(match cache_lck.query(id) {
             Entry::Unknown => {
-                let data = self.decompress(seq, &backend::load(&self.dir, id)?)?;
-                self.cache.write().memoize(id, &data);
+                let data = self.load_decomp(seq, id)?;
+                cache_lck.memorize(id, &data);
                 Some(data)
             }
             Entry::Known(data) => Some(data),
             Entry::KnownZero => None,
-            Entry::Ignored => Some(self.decompress(seq, &backend::load(&self.dir, id)?)?),
+            Entry::Ignored => Some(self.load_decomp(seq, id)?),
         })
+    }
+
+    fn load_decomp(&self, seq: usize, id: &'d str) -> Fallible<Vec<u8>> {
+        backend::load(&self.dir, id).and_then(|d| self.decompress(seq, &d))
     }
 
     fn decompress(&self, seq: usize, compressed: &[u8]) -> Fallible<Vec<u8>> {
         let uncomp = backend::decompress(compressed)
             .with_context(|_| format_err!("Failed to decompress {}", self.fmt_chunk(seq)))?;
         if uncomp.len() != CHUNKSIZE as usize {
-            return Err(ExtractError::BackupFormat(format!(
-                "uncompressed {} has wrong length",
-                self.fmt_chunk(seq)
-            ))
-            .into());
+            return Err(ChunkError::Missized(seq, uncomp.len()).into());
         }
         Ok(uncomp)
     }
@@ -128,6 +135,12 @@ impl<'d> ChunkVec<'d> {
     fn fmt_chunk(&self, seq: usize) -> String {
         format!("chunk #{} ({})", seq, self.ids[seq].unwrap_or("n/a"))
     }
+}
+
+#[derive(Fail, Debug, PartialEq, Eq)]
+pub enum ChunkError {
+    #[fail(display = "Chunk #{} has wrong size: {} B", _0, _1)]
+    Missized(usize, usize),
 }
 
 #[cfg(test)]

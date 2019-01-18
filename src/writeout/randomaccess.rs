@@ -50,7 +50,7 @@ impl Writer for Continuous {
 
 struct Sparse;
 
-const BLKSIZE: usize = 16 * 1024;
+const BLKSIZE: usize = 64 * 1024;
 
 impl Writer for Sparse {
     fn data_chunk(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {

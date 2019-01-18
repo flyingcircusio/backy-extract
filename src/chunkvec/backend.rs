@@ -4,7 +4,10 @@ use crate::CHUNKSIZE;
 use byteorder::{BigEndian, WriteBytesExt};
 use failure::{format_err, Fail, Fallible, ResultExt};
 use lazy_static::lazy_static;
+use libc::{posix_fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
 use std::fs;
+use std::io::prelude::*;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 lazy_static! {
@@ -25,8 +28,22 @@ pub fn check(dir: &Path) -> Fallible<()> {
 }
 
 pub fn load(dir: &Path, id: &str) -> Fallible<Vec<u8>> {
-    let f = dir.join(format!("chunks/{}/{}.chunk.lzo", &id[0..2], id));
-    Ok(fs::read(&f).with_context(|_| DecompressError::Read(f.display().to_string()))?)
+    let p = dir.join(format!("chunks/{}/{}.chunk.lzo", &id[0..2], id));
+    let mut buf = Vec::with_capacity(CHUNKSIZE as usize);
+    fs::File::open(&p)
+        .and_then(|mut f| {
+            unsafe {
+                posix_fadvise(
+                    f.as_raw_fd(),
+                    0,
+                    0,
+                    POSIX_FADV_SEQUENTIAL | POSIX_FADV_NOREUSE,
+                );
+            }
+            f.read_to_end(&mut buf)
+        })
+        .with_context(|_| DecompressError::Read(p.display().to_string()))?;
+    Ok(buf)
 }
 
 pub fn decompress(comp: &[u8]) -> Result<Vec<u8>, DecompressError> {
@@ -43,6 +60,6 @@ pub enum DecompressError {
     LZO(minilzo::Error),
     #[fail(display = "Compressed chunk does not start with magic number")]
     Magic,
-    #[fail(display = "Could not read chunk file `{}'", _0)]
+    #[fail(display = "Could not read compressed chunk `{}'", _0)]
     Read(String),
 }

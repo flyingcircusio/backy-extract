@@ -1,7 +1,10 @@
 use crate::{CHUNKSIZE, ZERO_CHUNK};
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
+use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const MAX_KEYS: usize = 32; // 128 MiB
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum Entry {
     /// chunk should be cached, but no data currently available
     Unknown,
@@ -13,49 +16,62 @@ pub enum Entry {
     Ignored,
 }
 
-use self::Entry::*;
-
-const MAX_KEYS: usize = 16;
+impl fmt::Debug for Entry {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Entry::Unknown => write!(f, "Unknown"),
+            Entry::Known(ref d) => write!(f, "Known({:x?}…)", &d[..4]),
+            Entry::KnownZero => write!(f, "KnownZero"),
+            Entry::Ignored => write!(f, "Ignored"),
+        }
+    }
+}
 
 /// Cache those chunks which IDs are mentioned more than once in the revision spec. All other
 /// IDs are not worth the effort. The cache size is further constrained by `MAX_KEYS` to limit
 /// memory usage.
 #[derive(Debug, Clone, Default)]
-pub struct Cache<'a> {
-    map: HashMap<&'a str, Entry>,
-}
+pub struct Cache<'a>(HashMap<&'a str, Entry>);
 
 impl<'a> Cache<'a> {
     /// Initializes cache from `mapping` found in the revision spec.
     pub fn new(mapping: &HashMap<&'a str, &'a str>) -> Self {
-        let mut histogram: HashMap<&str, u32> =
+        let mut histogram: HashMap<&str, i32> =
             mapping.values().fold(HashMap::new(), |mut h, id| {
                 *(h.entry(*id).or_insert(0)) += 1;
                 h
             });
-        Self {
-            map: histogram
-                .drain()
-                .filter(|(_, count)| *count > 1)
+        let by_occurence: BinaryHeap<(i32, &str)> =
+            histogram.drain().map(|(id, count)| (-count, id)).collect();
+        Cache(
+            by_occurence
+                .into_sorted_vec()
+                .drain(..)
+                .take_while(|(count, _)| -count > 1)
                 .take(MAX_KEYS)
-                .map(|(id, _)| (id, Unknown))
+                .map(|(_, id)| (id, Entry::Unknown))
                 .collect(),
-        }
+        )
+    }
+
+    /// List "interesting" IDs, i.e. those that we are willing to cache.
+    pub fn interesting(&self) -> Vec<&'a str> {
+        self.0.keys().cloned().collect()
     }
 
     /// Checks if an ID is in the cache and returns a copy of the chunk if it is.
     pub fn query(&self, id: &'a str) -> Entry {
-        self.map.get(&id).cloned().unwrap_or(Ignored)
+        self.0.get(&id).cloned().unwrap_or(Entry::Ignored)
     }
 
     /// Inserts a chunk into the cache. Panics if the `id` is not supposed to be cached.
-    pub fn memoize(&mut self, id: &'a str, data: &[u8]) {
-        let prev = if data == &ZERO_CHUNK[0..CHUNKSIZE as usize] {
-            self.map.insert(id, KnownZero)
+    pub fn memorize(&mut self, id: &'a str, data: &[u8]) {
+        let entry = if data == &ZERO_CHUNK[0..CHUNKSIZE as usize] {
+            Entry::KnownZero
         } else {
-            self.map.insert(id, Known(data.to_vec()))
+            Entry::Known(data.to_vec())
         };
-        if prev.is_none() {
+        if self.0.insert(id, entry).is_none() {
             panic!("Trying to insert ignored key '{}' into cache", id)
         }
     }
@@ -63,9 +79,8 @@ impl<'a> Cache<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::Entry::*;
     use super::*;
-    use galvanic_assert::assert_that;
-    use galvanic_assert::matchers::collection::*;
     use lazy_static::lazy_static;
 
     lazy_static! {
@@ -101,13 +116,15 @@ mod tests {
     #[test]
     fn consider_only_interesting_ids() {
         let c = Cache::new(&mapping);
-        assert_that!(
-            &c.map.keys().collect::<Vec<_>>(),
-            contains_in_any_order(&[
-                "c72b4ba82d1f51b71c8a18195ad33fc8",
+        let mut keys = c.interesting();
+        keys.sort();
+        assert_eq!(
+            &keys,
+            &[
                 "830438f8c407cbf6712b9bd07731e6e2",
+                "c72b4ba82d1f51b71c8a18195ad33fc8",
                 "eaf125854dcf1c4e071a5cddcaf37c37"
-            ])
+            ]
         );
     }
 
@@ -121,10 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn memoize_data() {
+    fn memorize_data() {
         let mut c = Cache::new(&mapping);
         assert_eq!(c.query("eaf125854dcf1c4e071a5cddcaf37c37"), Unknown);
-        c.memoize("eaf125854dcf1c4e071a5cddcaf37c37", &b"data"[..]);
+        c.memorize("eaf125854dcf1c4e071a5cddcaf37c37", &b"data"[..]);
         assert_eq!(
             c.query("eaf125854dcf1c4e071a5cddcaf37c37"),
             Known(b"data".to_vec())
@@ -133,15 +150,16 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn memoize_ignored_chunk() {
+    fn memorize_ignored_chunk() {
         let mut c = Cache::new(&mapping);
-        c.memoize("091b34a64e50a123da8547a1b700c7e8", &b"data"[..]);
+        c.memorize("091b34a64e50a123da8547a1b700c7e8", &b"data"[..]);
     }
 
     #[test]
-    fn memoize_zero_chunk() {
+    fn memorize_zero_chunk() {
         let mut c = Cache::new(&mapping);
-        c.memoize("c72b4ba82d1f51b71c8a18195ad33fc8", &ZERO_CHUNK);
+        assert_eq!(c.query("c72b4ba82d1f51b71c8a18195ad33fc8"), Unknown);
+        c.memorize("c72b4ba82d1f51b71c8a18195ad33fc8", &ZERO_CHUNK);
         assert_eq!(c.query("c72b4ba82d1f51b71c8a18195ad33fc8"), KnownZero);
     }
 
