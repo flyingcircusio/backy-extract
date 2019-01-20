@@ -4,10 +4,12 @@ use crate::CHUNKSIZE;
 use byteorder::{BigEndian, WriteBytesExt};
 use failure::{Fail, Fallible};
 use lazy_static::lazy_static;
+#[cfg(os = "linux")]
 use libc::{c_int, posix_fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
 use memmap::Mmap;
 use smallvec::{smallvec, SmallVec};
 use std::fs::{read_to_string, File};
+#[cfg(os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -19,12 +21,26 @@ lazy_static! {
     };
 }
 
+#[cfg(os = "linux")]
 fn fadvise(f: &File, advise: c_int) {
     unsafe {
         posix_fadvise(f.as_raw_fd(), 0, 0, advise);
         // Swallow return code since we wouldn't bail out on error anyway
     }
 }
+
+#[cfg(not(os = "linux"))]
+fn fadvise(_f: &File, _advise: DummyFAdvise) {}
+
+#[cfg(not(os = "linux"))]
+#[allow(non_camel_case_types)]
+enum DummyFAdvise {
+    POSIX_FADV_SEQUENTIAL,
+    POSIX_FADV_NOREUSE,
+}
+
+#[cfg(not(os = "linux"))]
+use self::DummyFAdvise::*;
 
 /// Computes file name for chunk with ID (relativ to backup base directory).
 pub fn filename(dir: &Path, id: &str) -> PathBuf {
