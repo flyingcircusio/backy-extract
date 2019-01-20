@@ -5,7 +5,7 @@ use self::cache::{Cache, Entry};
 use super::{ExtractError, RawChunk, CHUNKSIZE};
 
 use crossbeam::channel::Sender;
-use failure::{format_err, Fail, Fallible, ResultExt};
+use failure::{Fail, Fallible, ResultExt};
 use num_cpus;
 use parking_lot::Mutex;
 use serde_derive::Deserialize;
@@ -93,7 +93,7 @@ impl<'d> ChunkVec<'d> {
                 .send(RawChunk {
                     seq,
                     data: match chunk {
-                        Some(id) => self.cached(seq, id)?,
+                        Some(id) => self.lookup_cache(seq, id)?,
                         None => None,
                     },
                 })
@@ -102,45 +102,44 @@ impl<'d> ChunkVec<'d> {
         Ok(())
     }
 
-    fn cached(&self, seq: usize, id: &'d str) -> Fallible<Option<Vec<u8>>> {
+    // Returns cached version the chunk (identified with `id`) is found in the cache. Otherwise,
+    // performs decompression and stores decompressed chunk in the cache.
+    //
+    // Note that the cache will panic on an attempt to store a chunk which is not eligible.
+    fn lookup_cache(&self, seq: usize, id: &'d str) -> Fallible<Option<Vec<u8>>> {
         if !self.cached_ids.iter().any(|i| *i == id) {
-            return Ok(Some(self.load_decomp(seq, id)?));
+            return Ok(Some(
+                backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?,
+            ));
         }
         let mut cache_lck = self.cache.lock();
         Ok(match cache_lck.query(id) {
             Entry::Unknown => {
-                let data = self.load_decomp(seq, id)?;
+                let data = backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?;
                 cache_lck.memorize(id, &data);
                 Some(data)
             }
             Entry::Known(data) => Some(data),
             Entry::KnownZero => None,
-            Entry::Ignored => Some(self.load_decomp(seq, id)?),
+            Entry::Ignored => {
+                Some(backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?)
+            }
         })
-    }
-
-    fn load_decomp(&self, seq: usize, id: &'d str) -> Fallible<Vec<u8>> {
-        backend::load(&self.dir, id).and_then(|d| self.decompress(seq, &d))
-    }
-
-    fn decompress(&self, seq: usize, compressed: &[u8]) -> Fallible<Vec<u8>> {
-        let uncomp = backend::decompress(compressed)
-            .with_context(|_| format_err!("Failed to decompress {}", self.fmt_chunk(seq)))?;
-        if uncomp.len() != CHUNKSIZE as usize {
-            return Err(ChunkError::Missized(seq, uncomp.len()).into());
-        }
-        Ok(uncomp)
-    }
-
-    fn fmt_chunk(&self, seq: usize) -> String {
-        format!("chunk #{} ({})", seq, self.ids[seq].unwrap_or("n/a"))
     }
 }
 
 #[derive(Fail, Debug, PartialEq, Eq)]
-pub enum ChunkError {
-    #[fail(display = "Chunk #{} has wrong size: {} B", _0, _1)]
-    Missized(usize, usize),
+#[fail(display = "Error while loading chunk #{} ({})", seq, id)]
+struct ChunkError {
+    seq: usize,
+    id: String,
+}
+
+fn chunk_error(seq: usize, id: &str) -> ChunkError {
+    ChunkError {
+        seq,
+        id: id.to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -2,64 +2,82 @@
 
 use crate::CHUNKSIZE;
 use byteorder::{BigEndian, WriteBytesExt};
-use failure::{format_err, Fail, Fallible, ResultExt};
+use failure::{Fail, Fallible};
 use lazy_static::lazy_static;
-use libc::{posix_fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
-use std::fs;
-use std::io::prelude::*;
+use libc::{c_int, posix_fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
+use memmap::Mmap;
+use smallvec::{smallvec, SmallVec};
+use std::fs::{read_to_string, File};
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 lazy_static! {
-    static ref MAGIC: Vec<u8> = {
-        let mut m = vec![0xF0];
+    static ref MAGIC: SmallVec<[u8; 5]> = {
+        let mut m = smallvec![0xF0];
         m.write_u32::<BigEndian>(CHUNKSIZE).unwrap();
         m
     };
 }
 
+fn fadvise(f: &File, advise: c_int) {
+    unsafe {
+        posix_fadvise(f.as_raw_fd(), 0, 0, advise);
+        // Swallow return code since we wouldn't bail out on error anyway
+    }
+}
+
+/// Computes file name for chunk with ID (relativ to backup base directory).
+pub fn filename(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("chunks/{}/{}.chunk.lzo", &id[0..2], id))
+}
+
+/// Verifies store format. Currently only backy chunked v2 backends are supported.
 pub fn check(dir: &Path) -> Fallible<()> {
-    let version_tag = fs::read_to_string(dir.join("chunks/store"))?;
-    if version_tag.trim() != "v2" {
-        Err(format_err!("expected `v2', got `{}'", version_tag))
+    let version_tag = read_to_string(dir.join("chunks/store"))?;
+    let version_tag = version_tag.trim();
+    if version_tag != "v2" {
+        Err(LoadError::VersionTag(version_tag.to_owned()).into())
     } else {
         Ok(())
     }
 }
 
-pub fn load(dir: &Path, id: &str) -> Fallible<Vec<u8>> {
-    let p = dir.join(format!("chunks/{}/{}.chunk.lzo", &id[0..2], id));
-    let mut buf = Vec::with_capacity(CHUNKSIZE as usize);
-    fs::File::open(&p)
-        .and_then(|mut f| {
-            unsafe {
-                posix_fadvise(
-                    f.as_raw_fd(),
-                    0,
-                    0,
-                    POSIX_FADV_SEQUENTIAL | POSIX_FADV_NOREUSE,
-                );
-            }
-            f.read_to_end(&mut buf)
-        })
-        .with_context(|_| DecompressError::Read(p.display().to_string()))?;
-    Ok(buf)
-}
-
-pub fn decompress(comp: &[u8]) -> Result<Vec<u8>, DecompressError> {
-    if comp[0..5] != MAGIC[..] {
-        return Err(DecompressError::Magic);
+fn decompress(f: &File) -> Fallible<Vec<u8>> {
+    let compressed = unsafe { Mmap::map(&f)? };
+    // first 5 bytes contain header
+    if compressed[0..5] != MAGIC[..] {
+        return Err(LoadError::Magic.into());
     }
-    // skip 5 header bytes
-    Ok(minilzo::decompress(&comp[5..], CHUNKSIZE as usize).map_err(DecompressError::LZO)?)
+    Ok(minilzo::decompress(&compressed[5..], CHUNKSIZE as usize).map_err(LoadError::LZO)?)
 }
 
-#[derive(Fail, Debug)]
-pub enum DecompressError {
-    #[fail(display = "LZO format error: {}", _0)]
-    LZO(minilzo::Error),
+/// Loads compressed chunk identified by `id` from a backend store located in `path`. The chunk is
+/// decompressed on the fly and returned as raw data.
+pub fn load(dir: &Path, id: &str) -> Fallible<Vec<u8>> {
+    let p = filename(dir, id);
+    let f = File::open(&p)?;
+    fadvise(&f, POSIX_FADV_SEQUENTIAL);
+    let data = decompress(&f)?;
+    fadvise(&f, POSIX_FADV_NOREUSE);
+    if data.len() != CHUNKSIZE as usize {
+        Err(LoadError::Missized(data.len()).into())
+    } else {
+        Ok(data)
+    }
+}
+
+#[derive(Fail, Debug, PartialEq)]
+pub enum LoadError {
+    #[fail(display = "Unexpected version tag in chunk store: {}", _0)]
+    VersionTag(String),
+    #[fail(display = "Decompressed chunk has wrong size: {} B", _0)]
+    Missized(usize),
     #[fail(display = "Compressed chunk does not start with magic number")]
     Magic,
-    #[fail(display = "Could not read compressed chunk `{}'", _0)]
-    Read(String),
+    #[fail(display = "LZO compression format error: {}", _0)]
+    LZO(minilzo::Error),
 }
+
+// TODO:
+// Test correupted chunk
+// Test short chunk

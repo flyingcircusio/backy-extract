@@ -1,4 +1,5 @@
 use backy_extract::*;
+
 use failure::{ensure, Fallible};
 use flate2::read::GzDecoder;
 use lazy_static::lazy_static;
@@ -8,14 +9,15 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 use tempdir::TempDir;
 
+//
+// Generic test helpers
+//
+
 lazy_static! {
-    static ref FIXTURES: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    pub static ref FIXTURES: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
 }
 
-//
-// Helper methods
-//
-fn image() -> Vec<u8> {
+pub fn image() -> Vec<u8> {
     let f = File::open(FIXTURES.join("image.gz")).expect("fopen image.gz");
     let mut buf = Vec::new();
     GzDecoder::new(f)
@@ -24,14 +26,14 @@ fn image() -> Vec<u8> {
     buf
 }
 
-fn store() -> TempDir {
+pub fn store() -> TempDir {
     let tmp = TempDir::new("store").expect("create tempdir");
     let mut a = Archive::new(File::open(FIXTURES.join("store.tar")).expect("fopen store.tar"));
     a.unpack(&tmp).expect("unpack store.tar");
     tmp
 }
 
-fn store_with_rev(json: &str) -> (TempDir, Extractor) {
+pub fn store_with_rev(json: &str) -> (TempDir, Extractor) {
     let tmp = TempDir::new("store").expect("create tempdir");
     let mut a = Archive::new(File::open(FIXTURES.join("store.tar")).expect("fopen store.tar"));
     a.unpack(&tmp).expect("unpack store.tar");
