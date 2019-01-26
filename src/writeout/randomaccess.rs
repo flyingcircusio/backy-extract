@@ -18,7 +18,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "failed to write whole buffer",
-                ))
+                ));
             }
             Ok(n) => {
                 buf = &buf[n..];

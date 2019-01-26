@@ -10,6 +10,11 @@ use failure::{ensure, Fallible, ResultExt};
 use std::ffi::OsStr;
 use std::io;
 
+// Detect static linkage and add lzo2 in this case
+#[cfg(target_feature = "crt-static")]
+#[link(name = "lzo2", kind = "static")]
+extern "C" {}
+
 fn run() -> Fallible<()> {
     let m = app_from_crate!()
         .arg(
@@ -38,12 +43,11 @@ fn run() -> Fallible<()> {
             Arg::with_name("QUIET")
                 .long("quiet")
                 .short("q")
-                .help("Suppresses progress indication")
-                .conflicts_with("SPARSE"),
+                .help("Suppresses progress indication"),
         )
         .arg(
             Arg::with_name("REVISION")
-                .help("Backy backup revision file [e.g., `2hQmTeMjRaFG9jonuXeCnR' or `last']")
+                .help("Backy backup revision file (e.g., `2hQmTeMjRaFG9jonuXeCnR' or `last')")
                 .required(true),
         )
         .arg(Arg::with_name("OUTPUT").help("Output file or block device (or stdout if absent)"))

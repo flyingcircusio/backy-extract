@@ -6,7 +6,6 @@ use super::{ExtractError, RawChunk, CHUNKSIZE};
 
 use crossbeam::channel::Sender;
 use failure::{Fail, Fallible, ResultExt};
-use num_cpus;
 use parking_lot::Mutex;
 use serde_derive::Deserialize;
 use std::collections::HashMap;
