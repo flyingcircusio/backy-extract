@@ -1,10 +1,8 @@
-// TODO
-// - static linkage
-mod chunkvec;
 mod writeout;
 
-use self::chunkvec::ChunkVec;
 pub use self::writeout::{RandomAccess, Stream, WriteOut};
+use backend;
+use chunk_bucket::Bucket;
 
 use console::{style, StyledObject};
 use crossbeam::channel::{bounded, unbounded, Receiver};
@@ -19,24 +17,12 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Size of an uncompressed Chunk in the backy store. This value must be a u32 because it is
-/// encoded as 32 bit uint the chunk file header.
-pub const CHUNKSIZE: u32 = 4 * 1024 * 1024;
+/// Size of an uncompressed Chunk in the backy store. This value must fit into u32 because of the
+/// chunk file header's size limit.
+pub const CHUNKSIZE: u64 = 4 * 1024 * 1024;
 
 lazy_static! {
-    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSIZE as usize).expect("mmap");
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RawChunk {
-    seq: usize,
-    data: Option<Vec<u8>>,
-}
-
-#[derive(Debug)]
-pub struct CompressedChunk {
-    seq: usize,
-    data: Vec<u8>,
+    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSIZE as usize).expect("mmap zero");
 }
 
 fn acquire_lock(basedir: &Path) -> Fallible<File> {
@@ -56,10 +42,12 @@ fn step(i: u32) -> StyledObject<String> {
 /// caller-supplied `WriteOut` instance.
 #[derive(Debug)]
 pub struct Extractor {
+    basedir: PathBuf,
+    revfile: PathBuf,
     revision: String,
     threads: u8,
-    basedir: PathBuf,
     lock: File,
+    started: Instant;
     progress: ProgressBar,
 }
 
@@ -79,10 +67,12 @@ impl Extractor {
             basedir.display()
         ))?;
         Ok(Self {
+            basedir,
+            revfile: revfile.to_path_buf(),
             revision,
             threads: Self::default_threads(),
-            basedir,
             lock,
+            started: Instant::now(),
             progress: ProgressBar::hidden(),
         })
     }
@@ -107,6 +97,10 @@ impl Extractor {
             ProgressBar::hidden()
         };
         self
+    }
+
+    fn print_init(&self, nchunks: usize) {
+        self.progress.println(format!("{} Loading chunk map", step(1)));
     }
 
     fn print_decompress(&self, nchunks: usize) {
@@ -138,9 +132,9 @@ impl Extractor {
         total
     }
 
-    fn print_finished(&self, written: u64, started: Instant) {
-        let rt = Instant::now().duration_since(started);
-        let runtime = rt.as_secs() as f64 + f64::from(rt.subsec_micros()) / 1e6;
+    fn print_finished(&self, written: u64) {
+        let t = Instant::now().duration_since(self.started);
+        let runtime = t.as_secs() as f64 + f64::from(t.subsec_micros()) / 1e6;
         let rate = written as f64 / runtime.max(1.0);
         self.progress.println(format!(
             "{} Finished restoring {} in {:.1}s ({}/s)",
@@ -152,33 +146,38 @@ impl Extractor {
     }
 
     /// Initiates the restore process to an already instantiated `writer` object.
-    pub fn extract<W>(&self, mut writer: W) -> Fallible<()>
+    pub fn extract<W>(&self, write: W) -> Fallible<()>
     where
-        W: WriteOut + Send + Sync,
+        W: WriteBuilder,
     {
-        let start = Instant::now();
-        self.progress
-            .println(format!("{} Loading chunk map", step(1)));
-        let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
+        self.print_init();
+        let backend = backend::Chunked_V2::init(&self.revision, &self.revfile)?;
+        let bucket = Bucket::new(&backend);
 
-        self.print_decompress(chunks.len());
-        let (res, res_rx) = unbounded();
-        let (progress, progress_rx) = unbounded();
-        writer.configure(chunks.size, self.threads, progress);
+        self.print_decompress(backend.chunks());
+        let (res, res_rx) = bounded(self.threads as usize);
+        let (progress_tx, progress_rx) = bounded(self.threads as usize);
+        let writer = write.writer(progress_tx, &bucket, backend.size(), self.threads)
 
         let name = writer.name();
-        let total_bytes = thread::scope(|s| {
-            let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
-            for t in 0..self.threads {
-                let idx_iter = ((t as usize)..chunks.len()).step_by(self.threads as usize);
-                let chunk_tx = chunk_tx.clone();
-                s.spawn(|_| res.send(chunks.read(Box::new(idx_iter), chunk_tx)));
+        let total_bytes = thread::scope::<Fallible<u64>>(|s| {
+            let (load_tx, load_rx) = bounded(self.threads as usize);
+            let (write_tx, write_rx) = bounded(self.threads as usize);
+            for _ in 0..self.threads {
+                s.spawn(|_| (&load_rx).iter().map(|id| {
+                    bucket.add(id, &write_tx)
+                }).collect::<Fallible<()>>())?;
             }
-            drop(chunk_tx);
-            s.spawn(|_| res.send(writer.receive(chunk_rx)));
-            self.print_progress(chunks.size, &name, progress_rx)
+            drop(load_tx);
+            s.spawn(|_| backend.zero_ids().map(|id| write_tx.send(id)).collect::<Fallible<()>>())?;
+            drop(write_tx);
+            s.spawn(|_| res.send(writer.receive(write_tx)));
+            for id in backend.data_ids() {
+                load_tx.send(id)
+            }
+            Ok(self.print_progress(chunks.size, &name, progress_rx))
         })
-        .expect("subthread panic");
+        .expect("subthread panic")?;
 
         drop(res);
         self.print_finished(total_bytes, start);
