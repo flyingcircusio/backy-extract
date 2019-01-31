@@ -22,7 +22,7 @@ struct Revision<'d> {
 
 impl<'d> Revision<'d> {
     fn into_vec(mut self) -> Fallible<Vec<Option<&'d str>>> {
-        let max_chunks = (self.size / u64::from(CHUNKSIZE)) as usize;
+        let max_chunks = (self.size / CHUNKSIZE as u64) as usize;
         let mut vec = vec![None; max_chunks];
         for (chunknum, relpath) in self.mapping.drain() {
             let n = chunknum.parse::<usize>()?;
@@ -56,7 +56,7 @@ impl<'d> ChunkVec<'d> {
         let rev: Revision<'d> =
             serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
         let size = rev.size;
-        if size % u64::from(CHUNKSIZE) != 0 {
+        if size % (CHUNKSIZE as u64) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size).into());
         }
         let cache = Cache::new(&rev.mapping);

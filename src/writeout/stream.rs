@@ -9,7 +9,7 @@ use std::io::Write;
 
 pub struct Stream<W: ?Sized + Write> {
     out: Box<W>,
-    progress: Option<Sender<u32>>,
+    progress: Option<Sender<usize>>,
 }
 
 impl<W: Write + Send + Sync> Stream<W> {
@@ -64,7 +64,7 @@ impl Queue {
 }
 
 impl<W: Write + Send + Sync> WriteOut for Stream<W> {
-    fn configure(&mut self, _size: u64, _threads: u8, progress: Sender<u32>) {
+    fn configure(&mut self, _size: u64, _threads: u8, progress: Sender<usize>) {
         self.progress = Some(progress);
     }
 
@@ -103,7 +103,7 @@ mod tests {
     use crossbeam::channel::unbounded;
     use lazy_static::lazy_static;
 
-    const CS: usize = CHUNKSIZE as usize;
+    const CS: usize = CHUNKSIZE;
 
     lazy_static! {
         static ref CHUNKS: Vec<Vec<u8>> = vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];

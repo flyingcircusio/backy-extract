@@ -21,10 +21,10 @@ use std::time::Instant;
 
 /// Size of an uncompressed Chunk in the backy store. This value must be a u32 because it is
 /// encoded as 32 bit uint the chunk file header.
-pub const CHUNKSIZE: u32 = 4 * 1024 * 1024;
+pub const CHUNKSIZE: usize = 4 * 1024 * 1024;
 
 lazy_static! {
-    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSIZE as usize).expect("mmap");
+    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSIZE).expect("mmap");
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -109,6 +109,11 @@ impl Extractor {
         self
     }
 
+    fn print_start(&self) {
+        self.progress
+            .println(format!("{} Loading chunk map", step(1)));
+    }
+
     fn print_decompress(&self, nchunks: usize) {
         self.progress.println(format!(
             "{} Decompressing {} chunks in background using {} thread(s)",
@@ -118,7 +123,7 @@ impl Extractor {
         ));
     }
 
-    fn print_progress(&self, total_size: u64, name: &str, written: Receiver<u32>) -> u64 {
+    fn print_progress(&self, total_size: u64, name: &str, written: Receiver<usize>) -> u64 {
         self.progress
             .println(format!("{} Restoring to {}", step(3), style(name).yellow()));
         self.progress.set_length(total_size);
@@ -130,7 +135,7 @@ impl Extractor {
         self.progress.set_draw_delta(total_size / 1000);
         let mut total = 0;
         for bytes in written {
-            let bytes = u64::from(bytes);
+            let bytes = bytes as u64;
             self.progress.inc(bytes);
             total += bytes;
         }
@@ -156,9 +161,8 @@ impl Extractor {
     where
         W: WriteOut + Send + Sync,
     {
+        self.print_start();
         let start = Instant::now();
-        self.progress
-            .println(format!("{} Loading chunk map", step(1)));
         let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
 
         self.print_decompress(chunks.len());
@@ -183,6 +187,16 @@ impl Extractor {
         drop(res);
         self.print_finished(total_bytes, start);
         res_rx.iter().collect()
+    }
+}
+
+trait PathExt {
+    fn disp(&self) -> String;
+}
+
+impl PathExt for Path {
+    fn disp(&self) -> String {
+        format!("{}", style(self.display()).yellow())
     }
 }
 

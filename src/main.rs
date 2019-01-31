@@ -2,6 +2,9 @@
 //!
 //! This code uses the public crate interface to provide a handy shell command.
 
+#[macro_use]
+extern crate clap;
+
 use atty::{self, Stream::Stdout};
 use backy_extract::{Extractor, RandomAccess, Stream};
 use clap::{app_from_crate, crate_authors, crate_description, crate_name, crate_version, Arg};
@@ -14,6 +17,15 @@ use std::io;
 #[cfg(target_feature = "crt-static")]
 #[link(name = "lzo2", kind = "static")]
 extern "C" {}
+
+arg_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Sparse {
+        Auto,
+        Never,
+        Always
+    }
+}
 
 fn run() -> Fallible<()> {
     let m = app_from_crate!()
@@ -28,22 +40,17 @@ fn run() -> Fallible<()> {
             Arg::with_name("SPARSE")
                 .long("sparse")
                 .short("s")
-                .help("Skips over contiguous regions of NUL bytes [default]")
-                .display_order(500),
-        )
-        .arg(
-            Arg::with_name("NOSPARSE")
-                .long("no-sparse")
-                .short("S")
-                .help("Writes out contiguous regions of NUL bytes")
-                .conflicts_with("SPARSE")
-                .display_order(501),
+                .value_name("WHEN")
+                .possible_values(&Sparse::variants())
+                .default_value("auto")
+                .case_insensitive(true)
+                .help("Skips over contiguous regions of NUL bytes"),
         )
         .arg(
             Arg::with_name("QUIET")
                 .long("quiet")
                 .short("q")
-                .help("Suppresses progress indication"),
+                .help("Does not display progress indication"),
         )
         .arg(
             Arg::with_name("REVISION")
@@ -67,8 +74,15 @@ fn run() -> Fallible<()> {
         );
         e.extract(Stream::new(io::stdout()))
     } else {
-        let sparse = m.is_present("SPARSE") || !m.is_present("NOSPARSE");
-        e.extract(RandomAccess::new(output, sparse))
+        let sparse = value_t!(m, "SPARSE", Sparse).unwrap_or_else(|e| e.exit());
+        e.extract(RandomAccess::new(
+            output,
+            match sparse {
+                Sparse::Always => Some(true),
+                Sparse::Never => Some(false),
+                Sparse::Auto => None,
+            },
+        ))
     }
 }
 

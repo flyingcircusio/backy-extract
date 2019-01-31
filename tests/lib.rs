@@ -48,7 +48,7 @@ fn restore_to_stream() -> Fallible<()> {
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
     for t in &[1, 2] {
-        let mut buf = Vec::with_capacity(4 * CHUNKSIZE as usize);
+        let mut buf = Vec::with_capacity(4 * CHUNKSIZE);
         e.threads(*t).extract(Stream::new(&mut buf))?;
         assert_eq!(buf.len(), expected.len(), "length mismatch for t={}", t);
         ensure!(buf == expected, "restored image contents mismatch");
@@ -64,7 +64,8 @@ fn restore_to_file() -> Fallible<()> {
     let expected = image();
     for &sparse in &[true, false] {
         remove_file(&tgt).ok();
-        e.threads(3).extract(RandomAccess::new(&tgt, sparse))?;
+        e.threads(3)
+            .extract(RandomAccess::new(&tgt, Some(sparse)))?;
         ensure!(
             read(&tgt)? == expected,
             "restored image contents mismatch (sparse={})",

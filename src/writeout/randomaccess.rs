@@ -1,35 +1,14 @@
+use super::compat::write_all_at;
 use super::{RawChunk, WriteOut};
-use crate::{CHUNKSIZE, ZERO_CHUNK};
+use crate::{PathExt, CHUNKSIZE, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
-use failure::{format_err, Fallible, ResultExt};
+use failure::{format_err, Fail, Fallible, ResultExt};
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-
-// This method will be part of std::os::unix::fs::FileExt from 1.33.0 on
-fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
-    while !buf.is_empty() {
-        match file.write_at(buf, offset) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            Ok(n) => {
-                buf = &buf[n..];
-                offset += n as u64
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
 
 trait Writer {
     fn data_chunk(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
@@ -40,11 +19,11 @@ struct Continuous;
 
 impl Writer for Continuous {
     fn data_chunk(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-        write_all_at(f, data, seq as u64 * u64::from(CHUNKSIZE))
+        write_all_at(f, data, seq as u64 * CHUNKSIZE as u64)
     }
 
     fn zero_chunk(&self, f: &File, seq: usize) -> io::Result<()> {
-        write_all_at(f, &ZERO_CHUNK, seq as u64 * u64::from(CHUNKSIZE))
+        write_all_at(f, &ZERO_CHUNK, seq as u64 * CHUNKSIZE as u64)
     }
 }
 
@@ -54,7 +33,7 @@ const BLKSIZE: usize = 64 * 1024;
 
 impl Writer for Sparse {
     fn data_chunk(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-        let mut pos = seq as u64 * u64::from(CHUNKSIZE);
+        let mut pos = seq as u64 * CHUNKSIZE as u64;
         for slice in data.chunks(BLKSIZE) {
             if slice != &ZERO_CHUNK[..BLKSIZE] {
                 write_all_at(f, slice, pos)?;
@@ -73,43 +52,59 @@ pub struct RandomAccess {
     path: PathBuf,
     size: u64,
     threads: u8,
-    progress: Option<Sender<u32>>,
-    writer: Box<dyn Writer + Send + Sync>,
+    progress: Option<Sender<usize>>,
+    sparse: Option<bool>,
 }
 
 impl RandomAccess {
-    pub fn new<P: AsRef<Path>>(path: P, sparse: bool) -> Self {
+    pub fn new<P: AsRef<Path>>(path: P, sparse: Option<bool>) -> Self {
         Self {
             path: path.as_ref().to_owned(),
             size: 0,
             threads: 1,
             progress: None,
-            writer: if sparse {
+            sparse,
+        }
+    }
+
+    fn guess_sparse(&self) -> bool {
+        false
+    }
+
+    fn open(&self) -> Fallible<(File, Box<dyn Writer + Send + Sync>)> {
+        let f = File::create(&self.path)?;
+        let use_sparse = match f.set_len(self.size) {
+            Err(err) => {
+                if err.raw_os_error().unwrap_or_default() == 22 {
+                    // 22 (Invalid argument): cannot resize block devices
+                    self.sparse.unwrap_or_else(|| self.guess_sparse())
+                } else {
+                    // something is really wrong here
+                    return Err(err.into());
+                }
+            }
+            Ok(_) => self.sparse.unwrap_or(true),
+        };
+        Ok((
+            f,
+            if use_sparse {
                 Box::new(Sparse)
             } else {
                 Box::new(Continuous)
             },
-        }
+        ))
     }
 
-    fn open(&self) -> Fallible<File> {
-        let path = self.path.display();
-        let f = File::create(&self.path)
-            .with_context(|_| format_err!("Failed to open output file `{}'", path))?;
-        match f.set_len(self.size) {
-            // 22 (Invalid argument): cannot resize block devices
-            Err(ref err) if err.raw_os_error().unwrap_or_default() == 22 => Ok(()),
-            res => res,
-        }
-        .context(format_err!("Failed to resize output file `{}'", path))?;
-        Ok(f)
-    }
-
-    fn run(&self, f: &File, rx: Receiver<RawChunk>) -> Fallible<()> {
+    fn run(
+        &self,
+        f: &File,
+        rx: Receiver<RawChunk>,
+        writer: &(dyn Writer + Send + Sync),
+    ) -> Fallible<()> {
         for chunk in rx {
             match chunk.data {
-                Some(ref data) => self.writer.data_chunk(&f, chunk.seq, data),
-                None => self.writer.zero_chunk(&f, chunk.seq),
+                Some(ref data) => writer.data_chunk(&f, chunk.seq, data),
+                None => writer.zero_chunk(&f, chunk.seq),
             }
             .with_context(|_| {
                 format_err!(
@@ -127,19 +122,19 @@ impl RandomAccess {
 }
 
 impl WriteOut for RandomAccess {
-    fn configure(&mut self, size: u64, threads: u8, progress: Sender<u32>) {
+    fn configure(&mut self, size: u64, threads: u8, progress: Sender<usize>) {
         self.size = size;
         self.threads = threads;
         self.progress = Some(progress);
     }
 
     fn receive(self, chunks: Receiver<RawChunk>) -> Fallible<()> {
-        let file = self.open()?;
+        let (file, writer) = self.open().with_context(|_| OutputFile(self.path.disp()))?;
         thread::scope(|s| {
             let handles: Vec<_> = (0..self.threads)
                 .map(|_| {
                     let rx = chunks.clone();
-                    s.spawn(|_| self.run(&file, rx))
+                    s.spawn(|_| self.run(&file, rx, &*writer))
                 })
                 .collect();
             handles
@@ -161,3 +156,7 @@ impl fmt::Debug for RandomAccess {
         write!(f, "<RandomAccess {}>", self.path.display())
     }
 }
+
+#[derive(Fail, Debug)]
+#[fail(display = "Failed to open output file `{}`", _0)]
+struct OutputFile(String);

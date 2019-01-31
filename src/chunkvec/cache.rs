@@ -66,7 +66,7 @@ impl<'a> Cache<'a> {
 
     /// Inserts a chunk into the cache. Panics if the `id` is not supposed to be cached.
     pub fn memorize(&mut self, id: &'a str, data: &[u8]) {
-        let entry = if data == &ZERO_CHUNK[0..CHUNKSIZE as usize] {
+        let entry = if data == &ZERO_CHUNK[0..CHUNKSIZE] {
             Entry::KnownZero
         } else {
             Entry::Known(data.to_vec())

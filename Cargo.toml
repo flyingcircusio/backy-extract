@@ -9,7 +9,7 @@ license = "BSD-3-Clause"
 [dependencies]
 atty = "0.2"
 byteorder = "1.2"
-clap = "2.30"
+clap = { version = "2.32", features = ["wrap_help"] }
 console = "0.7"
 crossbeam = "0.6"
 failure = "0.1"
