@@ -2,7 +2,7 @@ mod backend;
 mod cache;
 
 use self::cache::{Cache, Entry};
-use super::{ExtractError, RawChunk, CHUNKSIZE};
+use super::{ExtractError, RawChunk, CHUNKSZ_LOG, pos2chunk};
 
 use crossbeam::channel::Sender;
 use failure::{Fail, Fallible, ResultExt};
@@ -22,7 +22,7 @@ struct Revision<'d> {
 
 impl<'d> Revision<'d> {
     fn into_vec(mut self) -> Fallible<Vec<Option<&'d str>>> {
-        let max_chunks = (self.size / CHUNKSIZE as u64) as usize;
+        let max_chunks = pos2chunk(self.size);
         let mut vec = vec![None; max_chunks];
         for (chunknum, relpath) in self.mapping.drain() {
             let n = chunknum.parse::<usize>()?;
@@ -56,7 +56,7 @@ impl<'d> ChunkVec<'d> {
         let rev: Revision<'d> =
             serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
         let size = rev.size;
-        if size % (CHUNKSIZE as u64) != 0 {
+        if size % (1 << CHUNKSZ_LOG) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size).into());
         }
         let cache = Cache::new(&rev.mapping);

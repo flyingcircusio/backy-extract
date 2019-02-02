@@ -1,4 +1,4 @@
-use crate::{CHUNKSIZE, ZERO_CHUNK};
+use crate::{ZERO_CHUNK};
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
 
@@ -66,7 +66,7 @@ impl<'a> Cache<'a> {
 
     /// Inserts a chunk into the cache. Panics if the `id` is not supposed to be cached.
     pub fn memorize(&mut self, id: &'a str, data: &[u8]) {
-        let entry = if data == &ZERO_CHUNK[0..CHUNKSIZE] {
+        let entry = if data == &ZERO_CHUNK[..] {
             Entry::KnownZero
         } else {
             Entry::Known(data.to_vec())

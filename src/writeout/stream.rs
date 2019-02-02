@@ -1,5 +1,5 @@
 use super::{RawChunk, WriteOut};
-use crate::{CHUNKSIZE, ZERO_CHUNK};
+use crate::{CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use failure::Fallible;
@@ -26,7 +26,7 @@ impl<W: Write + Send + Sync> Stream<W> {
             None => &ZERO_CHUNK,
         })?;
         if let Some(ref p) = self.progress {
-            p.send(CHUNKSIZE)?;
+            p.send(1 << CHUNKSZ_LOG)?;
         }
         Ok(())
     }
@@ -103,7 +103,7 @@ mod tests {
     use crossbeam::channel::unbounded;
     use lazy_static::lazy_static;
 
-    const CS: usize = CHUNKSIZE;
+    const CS: usize = 1 << CHUNKSZ_LOG;
 
     lazy_static! {
         static ref CHUNKS: Vec<Vec<u8>> = vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];

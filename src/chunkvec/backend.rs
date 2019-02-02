@@ -1,6 +1,6 @@
 //! Abstract over chunked backend store.
 
-use crate::CHUNKSIZE;
+use crate::CHUNKSZ_LOG;
 use byteorder::{BigEndian, WriteBytesExt};
 use failure::{Fail, Fallible};
 use lazy_static::lazy_static;
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 lazy_static! {
     static ref MAGIC: SmallVec<[u8; 5]> = {
         let mut m = smallvec![0xF0];
-        m.write_u32::<BigEndian>(CHUNKSIZE as u32).unwrap();
+        m.write_u32::<BigEndian>(1 << CHUNKSZ_LOG).unwrap();
         m
     };
 }
@@ -64,7 +64,7 @@ fn decompress(f: &File) -> Fallible<Vec<u8>> {
     if compressed[0..5] != MAGIC[..] {
         return Err(LoadError::Magic.into());
     }
-    Ok(minilzo::decompress(&compressed[5..], CHUNKSIZE).map_err(LoadError::LZO)?)
+    Ok(minilzo::decompress(&compressed[5..], 1 << CHUNKSZ_LOG).map_err(LoadError::LZO)?)
 }
 
 /// Loads compressed chunk identified by `id` from a backend store located in `path`. The chunk is
@@ -75,7 +75,7 @@ pub fn load(dir: &Path, id: &str) -> Fallible<Vec<u8>> {
     fadvise(&f, POSIX_FADV_SEQUENTIAL);
     let data = decompress(&f)?;
     fadvise(&f, POSIX_FADV_NOREUSE);
-    if data.len() != CHUNKSIZE {
+    if data.len() != 1 << CHUNKSZ_LOG {
         Err(LoadError::Missized(data.len()).into())
     } else {
         Ok(data)

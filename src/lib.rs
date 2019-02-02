@@ -1,5 +1,3 @@
-// TODO
-// - static linkage
 mod chunkvec;
 mod writeout;
 
@@ -21,10 +19,20 @@ use std::time::Instant;
 
 /// Size of an uncompressed Chunk in the backy store. This value must be a u32 because it is
 /// encoded as 32 bit uint the chunk file header.
-pub const CHUNKSIZE: usize = 4 * 1024 * 1024;
+pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
 
 lazy_static! {
-    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSIZE).expect("mmap");
+    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(1 << CHUNKSZ_LOG).expect("mmap");
+}
+
+// Converts file position/size into chunk sequence number
+fn pos2chunk(pos: u64) -> usize {
+    (pos >> CHUNKSZ_LOG) as usize
+}
+
+// Converts chunk sequence number into file offset
+fn chunk2pos(seq: usize) -> u64 {
+    (seq as u64) << CHUNKSZ_LOG
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

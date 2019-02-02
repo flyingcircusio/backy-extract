@@ -48,7 +48,7 @@ fn restore_to_stream() -> Fallible<()> {
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
     for t in &[1, 2] {
-        let mut buf = Vec::with_capacity(4 * CHUNKSIZE);
+        let mut buf = Vec::with_capacity(4 << CHUNKSZ_LOG);
         e.threads(*t).extract(Stream::new(&mut buf))?;
         assert_eq!(buf.len(), expected.len(), "length mismatch for t={}", t);
         ensure!(buf == expected, "restored image contents mismatch");
