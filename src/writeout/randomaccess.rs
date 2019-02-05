@@ -1,6 +1,6 @@
 use super::compat::write_all_at;
-use super::{RawChunk, WriteOut};
-use crate::{PathExt, CHUNKSZ_LOG, ZERO_CHUNK, chunk2pos, pos2chunk};
+use super::{RawChunk, WriteOut, WriteOutBuilder};
+use crate::{chunk2pos, pos2chunk, PathExt, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -9,46 +9,139 @@ use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand::rngs::ThreadRng;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
-trait Writer {
-    fn data(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
-    fn zero(&self, file: &File, pos: usize) -> io::Result<()>;
+#[derive(Debug, Clone)]
+pub struct RandomAccess {
+    path: PathBuf,
+    sparse: Option<bool>,
 }
 
-struct Continuous;
-
-impl Writer for Continuous {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-        write_all_at(f, data, chunk2pos(seq))
-    }
-
-    fn zero(&self, f: &File, seq: usize) -> io::Result<()> {
-        write_all_at(f, &ZERO_CHUNK, chunk2pos(seq))
+impl RandomAccess {
+    pub fn new<P: AsRef<Path>>(path: P, sparse: Option<bool>) -> Self {
+        Self {
+            path: path.as_ref().to_owned(),
+            sparse,
+        }
     }
 }
 
-struct Sparse;
+impl WriteOutBuilder for RandomAccess {
+    type Impl = RAWriteOut;
 
-const BLKSIZE: usize = 64 * 1024;
+    fn build(self, size: u64, threads: u8) -> Self::Impl {
+        RAWriteOut {
+            path: self.path,
+            sparse: self.sparse,
+            size,
+            threads,
+        }
+    }
+}
 
-impl Writer for Sparse {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-        let mut pos = chunk2pos(seq);
-        for slice in data.chunks(BLKSIZE) {
-            if slice != &ZERO_CHUNK[..BLKSIZE] {
-                write_all_at(f, slice, pos)?;
+#[derive(Clone, Default)]
+pub struct RAWriteOut {
+    path: PathBuf,
+    sparse: Option<bool>,
+    size: u64,
+    threads: u8,
+}
+
+impl RAWriteOut {
+    // Heuristic: read the first and the last chunk and 1% of the chunks in between. If there
+    // is any non-zero data detected, this device has not been discarded and must be writte in
+    // non-sparse mode.
+    fn guess_sparse(&self) -> io::Result<bool> {
+        // not worth the effort
+        if self.size <= 2 << CHUNKSZ_LOG {
+            return Ok(false);
+        }
+        let mut buf = vec![0; 1 << CHUNKSZ_LOG];
+        let mut dev = File::open(&self.path)?;
+        for chunk in SampleIter::new(pos2chunk(self.size)) {
+            dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;
+            dev.read_exact(&mut buf)?;
+            if buf != &ZERO_CHUNK[..] {
+                return Ok(false);
             }
-            pos += BLKSIZE as u64;
+        }
+        Ok(true)
+    }
+
+    // Opens restore target (file/dev) as stated in self.path. Resizes file accordingly and gives a
+    // guess if sparse mode can be used or not.
+    fn open(&self) -> Fallible<(File, bool)> {
+        let mut f = File::create(&self.path)?;
+        let sparse_guess = match f.set_len(self.size) {
+            Err(err) => {
+                if err.raw_os_error().unwrap_or_default() == 22 {
+                    // 22 (Invalid argument): cannot resize block devices
+                    self.guess_sparse()
+                        .context("Patrol read failed (is the restore device large enough?)")?
+                } else {
+                    // truncate failed with errno != 22 => we're borked
+                    return Err(err.into());
+                }
+            }
+            Ok(_) => true,
+        };
+        f.seek(io::SeekFrom::Start(0))?;
+        Ok((f, sparse_guess))
+    }
+
+    fn run(
+        &self,
+        f: &File,
+        rx: &Receiver<RawChunk>,
+        prog: &Sender<usize>,
+        writer: &(dyn Writer + Send + Sync),
+    ) -> Fallible<()> {
+        for chunk in rx {
+            match chunk.data {
+                Some(ref data) => writer.data(&f, chunk.seq, data),
+                None => writer.zero(&f, chunk.seq),
+            }
+            .with_context(|_| WriteChunkErr(chunk.seq, self.path.disp()))?;
+            prog.send(1 << CHUNKSZ_LOG)?;
         }
         Ok(())
     }
+}
 
-    fn zero(&self, _f: &File, _seq: usize) -> io::Result<()> {
+impl WriteOut for RAWriteOut {
+    fn receive(self, chunks: Receiver<RawChunk>, progress: Sender<usize>) -> Fallible<()> {
+        let (f, guess) = self
+            .open()
+            .with_context(|_| OutputFileErr(self.path.disp()))?;
+        let writer: Box<dyn Writer + Send + Sync> = if self.sparse.unwrap_or(guess) {
+            Box::new(Sparse)
+        } else {
+            Box::new(Continuous)
+        };
+        thread::scope(|s| {
+            let handles: Vec<_> = (0..self.threads)
+                .map(|_| s.spawn(|_| self.run(&f, &chunks, &progress, &*writer)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|hdl| hdl.join().expect("thread panic"))
+                .collect::<Result<(), _>>()
+        })
+        .expect("subthread panic")?;
         Ok(())
+    }
+
+    fn name(&self) -> String {
+        self.path.display().to_string()
+    }
+}
+
+impl fmt::Debug for RAWriteOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<RAWriteOut {}>", self.path.display())
     }
 }
 
@@ -91,128 +184,41 @@ impl Iterator for SampleIter {
     }
 }
 
-pub struct RandomAccess {
-    path: PathBuf,
-    size: u64,
-    threads: u8,
-    progress: Option<Sender<usize>>,
-    sparse: Option<bool>,
+trait Writer {
+    fn data(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
+    fn zero(&self, file: &File, pos: usize) -> io::Result<()>;
 }
 
-impl RandomAccess {
-    pub fn new<P: AsRef<Path>>(path: P, sparse: Option<bool>) -> Self {
-        Self {
-            path: path.as_ref().to_owned(),
-            size: 0,
-            threads: 1,
-            progress: None,
-            sparse,
-        }
+struct Continuous;
+
+impl Writer for Continuous {
+    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+        write_all_at(f, data, chunk2pos(seq))
     }
 
-    // Heuristic: read the first and the last chunk and 1% of the chunks in between. If there
-    // is any non-zero data detected, this device has not been discarded and must be writte in
-    // non-sparse mode.
-    fn guess_sparse(&self, dev: &mut File) -> Fallible<bool> {
-        // not worth the effort
-        if self.size <= 2 << CHUNKSZ_LOG {
-            return Ok(false);
-        }
-        let mut buf = vec![0; 1 << CHUNKSZ_LOG];
-        for chunk in SampleIter::new(pos2chunk(self.size)) {
-            dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;
-            dev.read_exact(&mut buf)?;
-            if buf != &ZERO_CHUNK[..] {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+    fn zero(&self, f: &File, seq: usize) -> io::Result<()> {
+        write_all_at(f, &ZERO_CHUNK, chunk2pos(seq))
     }
+}
 
-    // Opens restore target (file/dev) as stated in self.path. Resizes file accordingly and gives a
-    // guess if sparse mode can be used or not.
-    fn open(&self) -> Fallible<(File, bool)> {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(&self.path)?;
-        let sparse_guess = match f.set_len(self.size) {
-            Err(err) => {
-                if err.raw_os_error().unwrap_or_default() == 22 {
-                    // 22 (Invalid argument): cannot resize block devices
-                    self.guess_sparse(&mut f)
-                        .context("Patrol read failed (is the restore device large enough?)")?
-                } else {
-                    // truncate failed with errno != 22 => we're borked
-                    return Err(err.into());
-                }
-            }
-            Ok(_) => true
-        };
-        f.seek(io::SeekFrom::Start(0))?;
-        Ok((f, sparse_guess))
-    }
+struct Sparse;
 
-    fn run(
-        &self,
-        f: &File,
-        rx: Receiver<RawChunk>,
-        writer: &(dyn Writer + Send + Sync),
-    ) -> Fallible<()> {
-        for chunk in rx {
-            match chunk.data {
-                Some(ref data) => writer.data(&f, chunk.seq, data),
-                None => writer.zero(&f, chunk.seq),
+const BLKSIZE: usize = 64 * 1024;
+
+impl Writer for Sparse {
+    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+        let mut pos = chunk2pos(seq);
+        for slice in data.chunks(BLKSIZE) {
+            if slice != &ZERO_CHUNK[..BLKSIZE] {
+                write_all_at(f, slice, pos)?;
             }
-            .with_context(|_| WriteChunkErr(chunk.seq, self.path.disp()))?;
-            if let Some(ref prog) = self.progress {
-                prog.send(1 << CHUNKSZ_LOG)?;
-            }
+            pos += BLKSIZE as u64;
         }
         Ok(())
     }
-}
 
-impl WriteOut for RandomAccess {
-    fn configure(&mut self, size: u64, threads: u8, progress: Sender<usize>) {
-        self.size = size;
-        self.threads = threads;
-        self.progress = Some(progress);
-    }
-
-    fn receive(self, chunks: Receiver<RawChunk>) -> Fallible<()> {
-        let (f, guess) = self.open().with_context(|_| OutputFileErr(self.path.disp()))?;
-        let writer: Box<dyn Writer + Send + Sync> = if self.sparse.unwrap_or(guess) {
-            Box::new(Sparse)
-        } else {
-            Box::new(Continuous)
-        };
-        thread::scope(|s| {
-            let handles: Vec<_> = (0..self.threads)
-                .map(|_| {
-                    let rx = chunks.clone();
-                    s.spawn(|_| self.run(&f, rx, &*writer))
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|hdl| hdl.join().expect("thread panic"))
-                .collect::<Result<(), _>>()
-        })
-        .expect("subthread panic")?;
+    fn zero(&self, _f: &File, _seq: usize) -> io::Result<()> {
         Ok(())
-    }
-
-    fn name(&self) -> String {
-        self.path.display().to_string()
-    }
-}
-
-impl fmt::Debug for RandomAccess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<RandomAccess {}>", self.path.display())
     }
 }
 
@@ -229,39 +235,35 @@ mod tests {
     use super::*;
     use tempdir::TempDir;
 
-    #[test]
-    fn sparse_mode_should_be_guessed_on_empty_file() -> Fallible<()> {
+    fn sparse_mode_test<F>(modifier: F) -> io::Result<bool>
+    where
+        F: FnOnce(&mut File) -> io::Result<()>,
+    {
         let td = TempDir::new("sparse")?;
         let p = td.path().join("dev");
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&p)?;
-        for _ in 0..4 {
-            f.write_all(&ZERO_CHUNK[..])?;
+        {
+            let mut f = File::create(&p)?;
+            modifier(&mut f)?;
+            f.seek(io::SeekFrom::Start((4 << CHUNKSZ_LOG) - 1))?;
+            f.write(b"\0")?;
         }
-        let mut ra = RandomAccess::new(p, None);
+        let mut ra = RAWriteOut::default();
+        ra.path = p;
         ra.size = 4 << CHUNKSZ_LOG;
-        Ok(assert!(ra.guess_sparse(&mut f)?))
+        ra.guess_sparse()
     }
 
     #[test]
-    fn sparse_mode_should_not_be_guessed_on_nonempty_file() -> Fallible<()> {
-        let td = TempDir::new("sparse")?;
-        let p = td.path().join("dev");
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&p)?;
-        for _ in 0..4 {
-            f.write_all(&ZERO_CHUNK[..])?;
-        }
-        f.seek(io::SeekFrom::Start(3 << CHUNKSZ_LOG))?;
-        f.write_all(b"1")?;
-        let mut ra = RandomAccess::new(p, None);
-        ra.size = 4 << CHUNKSZ_LOG;
-        Ok(assert!(!ra.guess_sparse(&mut f)?))
+    fn sparse_mode_should_be_guessed_on_empty_file() {
+        assert!(sparse_mode_test(|_| Ok(())).unwrap())
+    }
+
+    #[test]
+    fn sparse_mode_should_not_be_guessed_on_nonempty_file() {
+        assert!(!sparse_mode_test(|f| {
+            f.seek(io::SeekFrom::Start(3 << CHUNKSZ_LOG))?;
+            f.write_all(b"1")
+        })
+        .unwrap())
     }
 }

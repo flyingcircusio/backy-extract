@@ -1,4 +1,4 @@
-use super::{RawChunk, WriteOut};
+use super::{RawChunk, WriteOut, WriteOutBuilder};
 use crate::{CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
@@ -9,26 +9,60 @@ use std::io::Write;
 
 pub struct Stream<W: ?Sized + Write> {
     out: Box<W>,
-    progress: Option<Sender<usize>>,
+}
+
+// Stream is so simple that it can easily implement WriteOutBuilder for itself.
+impl<W: Write + Send + Sync> WriteOutBuilder for Stream<W> {
+    type Impl = Stream<W>;
+
+    // Does not really do anything except fulfilling the trait requirement.
+    fn build(self, _size: u64, _threads: u8) -> Self::Impl {
+        self
+    }
 }
 
 impl<W: Write + Send + Sync> Stream<W> {
     pub fn new(out: W) -> Self {
-        Self {
-            out: Box::new(out),
-            progress: None,
-        }
+        Self { out: Box::new(out) }
     }
 
-    fn write(&mut self, chunk: &RawChunk) -> Fallible<()> {
+    fn write(&mut self, chunk: &RawChunk, prog: &Sender<usize>) -> Fallible<()> {
         self.out.write_all(match &chunk.data {
             Some(d) => &d,
             None => &ZERO_CHUNK,
         })?;
-        if let Some(ref p) = self.progress {
-            p.send(1 << CHUNKSZ_LOG)?;
+        prog.send(1 << CHUNKSZ_LOG)?;
+        Ok(())
+    }
+}
+
+impl<W: Write + Send + Sync> WriteOut for Stream<W> {
+    fn receive(mut self, chunks: Receiver<RawChunk>, progress: Sender<usize>) -> Fallible<()> {
+        let mut queue = Queue::new();
+        let mut exp_seq = 0;
+        for chunk in chunks {
+            if chunk.seq == exp_seq {
+                self.write(&chunk, &progress)?;
+                exp_seq += 1;
+            } else {
+                queue.put(chunk);
+            }
+            while let Some(c) = queue.get(exp_seq) {
+                self.write(&c, &progress)?;
+                exp_seq += 1;
+            }
         }
         Ok(())
+    }
+
+    fn name(&self) -> String {
+        "stdout".to_owned()
+    }
+}
+
+impl<W: Write + Send + Sync> fmt::Debug for Stream<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<Stream>")
     }
 }
 
@@ -38,6 +72,8 @@ struct Waiting {
     chunk: RawChunk,
 }
 
+// Sorts incoming chunks back into order. Chunks may arrive out of order because the Extractor
+// reads them in parallel.
 #[derive(Debug, Default)]
 struct Queue(BinaryHeap<Waiting>);
 
@@ -60,40 +96,6 @@ impl Queue {
             }
         }
         None
-    }
-}
-
-impl<W: Write + Send + Sync> WriteOut for Stream<W> {
-    fn configure(&mut self, _size: u64, _threads: u8, progress: Sender<usize>) {
-        self.progress = Some(progress);
-    }
-
-    fn receive(mut self, chunks: Receiver<RawChunk>) -> Fallible<()> {
-        let mut queue = Queue::new();
-        let mut exp_seq = 0;
-        for chunk in chunks {
-            if chunk.seq == exp_seq {
-                self.write(&chunk)?;
-                exp_seq += 1;
-            } else {
-                queue.put(chunk);
-            }
-            while let Some(c) = queue.get(exp_seq) {
-                self.write(&c)?;
-                exp_seq += 1;
-            }
-        }
-        Ok(())
-    }
-
-    fn name(&self) -> String {
-        "stdout".to_owned()
-    }
-}
-
-impl<W: Write + Send + Sync> fmt::Debug for Stream<W> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<Stream>")
     }
 }
 
@@ -121,7 +123,8 @@ mod tests {
         }
         drop(raw);
         let s = Stream::new(&mut buf);
-        s.receive(raw_rx)?;
+        let (p_tx, _p_rx) = unbounded();
+        s.receive(raw_rx, p_tx)?;
         assert_eq!(
             (0..4).map(|i| buf[i * CS]).collect::<Vec<_>>(),
             &[0, 1, 2, 3]

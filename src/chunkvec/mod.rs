@@ -2,7 +2,7 @@ mod backend;
 mod cache;
 
 use self::cache::{Cache, Entry};
-use super::{ExtractError, RawChunk, CHUNKSZ_LOG, pos2chunk};
+use super::{pos2chunk, ExtractError, RawChunk, CHUNKSZ_LOG};
 
 use crossbeam::channel::Sender;
 use failure::{Fail, Fallible, ResultExt};

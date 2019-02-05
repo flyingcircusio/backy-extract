@@ -2,7 +2,7 @@ mod chunkvec;
 mod writeout;
 
 use self::chunkvec::ChunkVec;
-pub use self::writeout::{RandomAccess, Stream, WriteOut};
+pub use self::writeout::{RandomAccess, Stream, WriteOut, WriteOutBuilder};
 
 use console::{style, StyledObject};
 use crossbeam::channel::{bounded, unbounded, Receiver};
@@ -165,9 +165,9 @@ impl Extractor {
     }
 
     /// Initiates the restore process to an already instantiated `writer` object.
-    pub fn extract<W>(&self, mut writer: W) -> Fallible<()>
+    pub fn extract<W>(&self, w: W) -> Fallible<()>
     where
-        W: WriteOut + Send + Sync,
+        W: WriteOutBuilder,
     {
         self.print_start();
         let start = Instant::now();
@@ -176,9 +176,9 @@ impl Extractor {
         self.print_decompress(chunks.len());
         let (res, res_rx) = unbounded();
         let (progress, progress_rx) = unbounded();
-        writer.configure(chunks.size, self.threads, progress);
-
+        let writer = w.build(chunks.size, self.threads);
         let name = writer.name();
+
         let total_bytes = thread::scope(|s| {
             let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
             for t in 0..self.threads {
@@ -187,7 +187,7 @@ impl Extractor {
                 s.spawn(|_| res.send(chunks.read(Box::new(idx_iter), chunk_tx)));
             }
             drop(chunk_tx);
-            s.spawn(|_| res.send(writer.receive(chunk_rx)));
+            s.spawn(|_| res.send(writer.receive(chunk_rx, progress)));
             self.print_progress(chunks.size, &name, progress_rx)
         })
         .expect("subthread panic");

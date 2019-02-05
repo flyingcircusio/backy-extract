@@ -1,4 +1,4 @@
-use crate::{ZERO_CHUNK};
+use crate::ZERO_CHUNK;
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
 
@@ -17,7 +17,7 @@ pub enum Entry {
 }
 
 impl fmt::Debug for Entry {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Entry::Unknown => write!(f, "Unknown"),
             Entry::Known(ref d) => write!(f, "Known({:x?}…)", &d[..4]),
