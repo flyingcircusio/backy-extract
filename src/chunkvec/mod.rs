@@ -1,15 +1,15 @@
-mod backend;
 mod cache;
 
 use self::cache::{Cache, Entry};
-use super::{pos2chunk, ExtractError, RawChunk, CHUNKSZ_LOG};
+use crate::backend::Backend;
+use crate::{pos2chunk, ExtractError, PathExt, RawChunk, CHUNKSZ_LOG};
 
 use crossbeam::channel::Sender;
-use failure::{Fail, Fallible, ResultExt};
+use failure::{format_err, Fail, Fallible, ResultExt};
 use parking_lot::Mutex;
 use serde_derive::Deserialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 // Format of the revision file as deserialized from JSON
@@ -38,8 +38,8 @@ impl<'d> Revision<'d> {
 /// Linearized version of a revision chunk map
 #[derive(Debug, Clone)]
 pub struct ChunkVec<'d> {
-    /// Backup directory (without `chunks`)
-    pub dir: PathBuf,
+    /// Backend handle
+    pub be: Backend,
     /// Total image size in bytes
     pub size: u64,
     /// Chunk file id indexed by chunk number, may contain holes
@@ -63,7 +63,8 @@ impl<'d> ChunkVec<'d> {
         let cached_ids = cache.interesting();
         let ids = rev.into_vec()?;
         Ok(Self {
-            dir: dir.into(),
+            be: Backend::open(dir)
+                .with_context(|_| format_err!("Failed to open backup directory {}", dir.disp()))?,
             size,
             ids,
             cache: Arc::new(Mutex::new(cache)),
@@ -85,7 +86,6 @@ impl<'d> ChunkVec<'d> {
         idx: Box<dyn Iterator<Item = usize>>,
         uncomp_tx: Sender<RawChunk>,
     ) -> Fallible<()> {
-        backend::check(&self.dir).context("Invalid `store' version tag")?;
         for seq in idx {
             let chunk = self.ids[seq];
             uncomp_tx
@@ -108,21 +108,19 @@ impl<'d> ChunkVec<'d> {
     fn lookup_cache(&self, seq: usize, id: &'d str) -> Fallible<Option<Vec<u8>>> {
         if !self.cached_ids.iter().any(|i| *i == id) {
             return Ok(Some(
-                backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?,
+                self.be.load(id).with_context(|_| chunk_error(seq, id))?,
             ));
         }
         let mut cache_lck = self.cache.lock();
         Ok(match cache_lck.query(id) {
             Entry::Unknown => {
-                let data = backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?;
+                let data = self.be.load(id).with_context(|_| chunk_error(seq, id))?;
                 cache_lck.memorize(id, &data);
                 Some(data)
             }
             Entry::Known(data) => Some(data),
             Entry::KnownZero => None,
-            Entry::Ignored => {
-                Some(backend::load(&self.dir, id).with_context(|_| chunk_error(seq, id))?)
-            }
+            Entry::Ignored => Some(self.be.load(id).with_context(|_| chunk_error(seq, id))?),
         })
     }
 }
@@ -138,33 +136,5 @@ fn chunk_error(seq: usize, id: &str) -> ChunkError {
     ChunkError {
         seq,
         id: id.to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossbeam::channel::unbounded;
-    use std::fs;
-    use tempdir::TempDir;
-
-    #[test]
-    fn check_backend_store() {
-        let (raw_tx, _) = unbounded();
-        let tmp = TempDir::new("check_backend_store").expect("create tempdir");
-        let cv = ChunkVec::decode(r#"{"mapping": {}, "size": 0}"#, &tmp.path())
-            .expect("ChunkVec::decode");
-
-        // (1) no `store' file at all
-        fs::create_dir(tmp.path().join("chunks")).unwrap();
-        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_err());
-
-        // (2) wrong contents
-        fs::write(tmp.path().join("chunks/store"), b"v1").unwrap();
-        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_err());
-
-        // (3) acceptable contents
-        fs::write(tmp.path().join("chunks/store"), b"v2").unwrap();
-        assert!(cv.read(Box::new(0..0), raw_tx.clone()).is_ok())
     }
 }

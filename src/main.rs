@@ -88,9 +88,9 @@ fn run() -> Fallible<()> {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("{}  {}", style("Error:").red().bold(), e);
+        eprintln!("{} {}", style("Error:").red().bold(), e);
         for cause in e.iter_causes() {
-            eprintln!("{} {}", style("Detail:").yellow().bold(), cause);
+            eprintln!("{} {}", style("Cause:").yellow().bold(), cause);
         }
         std::process::exit(1);
     }

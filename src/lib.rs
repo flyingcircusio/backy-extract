@@ -1,4 +1,7 @@
+mod backend;
 mod chunkvec;
+#[cfg(test)]
+mod test_helper;
 mod writeout;
 
 use self::chunkvec::ChunkVec;
@@ -210,7 +213,7 @@ impl PathExt for Path {
 
 #[derive(Fail, Debug, PartialEq, Eq)]
 pub enum ExtractError {
-    #[fail(display = "Failed to load revision spec `{:50.50}…'", _0)]
+    #[fail(display = "Failed to load revision spec `{}'", _0)]
     LoadSpec(String),
     #[fail(display = "Chunk #{} is out of bounds (0..{})", _0, _1)]
     OutOfBounds(usize, usize),
