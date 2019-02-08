@@ -1,11 +1,12 @@
-use super::{RawChunk, WriteOut, WriteOutBuilder};
-use crate::{CHUNKSZ_LOG, ZERO_CHUNK};
+use super::{WriteOut, WriteOutBuilder};
+use crate::{Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use failure::Fallible;
 use std::collections::BinaryHeap;
 use std::fmt;
 use std::io::Write;
+use std::rc::Rc;
 
 pub struct Stream<W: ?Sized + Write> {
     out: Box<W>,
@@ -26,10 +27,10 @@ impl<W: Write + Send + Sync> Stream<W> {
         Self { out: Box::new(out) }
     }
 
-    fn write(&mut self, chunk: &RawChunk, prog: &Sender<usize>) -> Fallible<()> {
-        self.out.write_all(match &chunk.data {
-            Some(d) => &d,
-            None => &ZERO_CHUNK,
+    fn write(&mut self, data: &Data, prog: &Sender<usize>) -> Fallible<()> {
+        self.out.write_all(match data {
+            Data::Some(d) => d,
+            Data::Zero => &ZERO_CHUNK,
         })?;
         prog.send(1 << CHUNKSZ_LOG)?;
         Ok(())
@@ -37,21 +38,21 @@ impl<W: Write + Send + Sync> Stream<W> {
 }
 
 impl<W: Write + Send + Sync> WriteOut for Stream<W> {
-    fn receive(mut self, chunks: Receiver<RawChunk>, progress: Sender<usize>) -> Fallible<()> {
+    fn receive(mut self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()> {
         let mut queue = Queue::new();
-        let mut exp_seq = 0;
+        let mut expect_seq = 0;
         for chunk in chunks {
-            if chunk.seq == exp_seq {
-                self.write(&chunk, &progress)?;
-                exp_seq += 1;
-            } else {
-                queue.put(chunk);
-            }
-            while let Some(c) = queue.get(exp_seq) {
-                self.write(&c, &progress)?;
-                exp_seq += 1;
+            let data = Rc::new(chunk.data);
+            chunk
+                .seqs
+                .into_iter()
+                .for_each(|seq| queue.put(seq, Rc::clone(&data)));
+            while let Some(d) = queue.get(expect_seq) {
+                self.write(&d, &progress)?;
+                expect_seq += 1;
             }
         }
+        assert!(queue.is_empty());
         Ok(())
     }
 
@@ -67,35 +68,44 @@ impl<W: Write + Send + Sync> fmt::Debug for Stream<W> {
 }
 
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq)]
-struct Waiting {
+struct WaitingChunk {
     prio: isize,
-    chunk: RawChunk,
+    data: Rc<Data>,
 }
 
 // Sorts incoming chunks back into order. Chunks may arrive out of order because the Extractor
 // reads them in parallel.
 #[derive(Debug, Default)]
-struct Queue(BinaryHeap<Waiting>);
+struct Queue(BinaryHeap<WaitingChunk>);
 
 impl Queue {
     fn new() -> Self {
         Queue(BinaryHeap::new())
     }
 
-    fn put(&mut self, chunk: RawChunk) {
-        self.0.push(Waiting {
-            prio: -(chunk.seq as isize),
-            chunk,
+    fn put(&mut self, seq: usize, data: Rc<Data>) {
+        self.0.push(WaitingChunk {
+            prio: -(seq as isize),
+            data,
         })
     }
 
-    fn get(&mut self, exp_seq: usize) -> Option<RawChunk> {
+    fn get(&mut self, expect_seq: usize) -> Option<Rc<Data>> {
         if let Some(e) = self.0.peek() {
-            if e.prio == -(exp_seq as isize) {
-                return Some(self.0.pop().unwrap().chunk);
+            if e.prio == -(expect_seq as isize) {
+                return Some(self.0.pop().unwrap().data);
             }
         }
         None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -104,6 +114,7 @@ mod tests {
     use super::*;
     use crossbeam::channel::unbounded;
     use lazy_static::lazy_static;
+    use smallvec::smallvec;
 
     const CS: usize = 1 << CHUNKSZ_LOG;
 
@@ -116,9 +127,9 @@ mod tests {
         let mut buf = Vec::with_capacity(4 * CS);
         let (raw, raw_rx) = unbounded();
         for &i in &[1, 3, 0, 2] {
-            raw.send(RawChunk {
-                seq: i,
-                data: Some(CHUNKS[i].to_vec()),
+            raw.send(Chunk {
+                seqs: smallvec![i],
+                data: Data::Some(CHUNKS[i].to_vec()),
             })?
         }
         drop(raw);

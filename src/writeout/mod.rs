@@ -5,12 +5,14 @@ mod stream;
 pub use self::randomaccess::RandomAccess;
 pub use self::stream::Stream;
 
-use super::RawChunk;
+use super::Chunk;
 use crossbeam::channel::{Receiver, Sender};
 use failure::Fallible;
 use std::fmt::Debug;
 
-/// WriteOut factory. We use the factory approach to have only the minimum of parameters to the
+/// WriteOut factory.
+///
+/// We use the factory approach to have only the minimum of parameters to the
 /// user-facing constructor. Further parameters from the Exctractor are supplied internally by
 /// invoking `build` to get the final WriteOut object.
 pub trait WriteOutBuilder {
@@ -20,6 +22,6 @@ pub trait WriteOutBuilder {
 
 /// Abstracts over restore backends.
 pub trait WriteOut: Debug {
-    fn receive(self, chunks: Receiver<RawChunk>, progress: Sender<usize>) -> Fallible<()>;
+    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()>;
     fn name(&self) -> String;
 }

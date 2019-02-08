@@ -1,5 +1,5 @@
 #[cfg(os = "linux")]
-use libc::{c_int, posix_fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
+use libc::{c_int, posix_fadvise, POSIX_FADV_DONTNEED};
 use std::fs::File;
 #[cfg(os = "linux")]
 use std::os::unix::io::AsRawFd;
@@ -15,6 +15,4 @@ pub fn fadvise(f: &File, advise: c_int) {
 #[cfg(not(os = "linux"))]
 pub fn fadvise(_f: &File, _advise: i32) {}
 #[cfg(not(os = "linux"))]
-pub const POSIX_FADV_SEQUENTIAL: i32 = 2;
-#[cfg(not(os = "linux"))]
-pub const POSIX_FADV_NOREUSE: i32 = 5;
+pub const POSIX_FADV_DONTNEED: i32 = 4;

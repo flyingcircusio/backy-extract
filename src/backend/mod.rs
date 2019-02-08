@@ -5,16 +5,15 @@
 
 mod fadvise;
 
-use self::fadvise::{fadvise, POSIX_FADV_NOREUSE, POSIX_FADV_SEQUENTIAL};
+use self::fadvise::{fadvise, POSIX_FADV_DONTNEED};
 use crate::CHUNKSZ_LOG;
 
 use byteorder::{BigEndian, WriteBytesExt};
 use failure::{Fail, Fallible, ResultExt};
-use fs2::FileExt;
 use lazy_static::lazy_static;
-use memmap::Mmap;
 use smallvec::{smallvec, SmallVec};
 use std::fs::{read_to_string, File};
+use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
 lazy_static! {
@@ -25,8 +24,10 @@ lazy_static! {
     };
 }
 
-fn decompress(f: &File) -> Fallible<Vec<u8>> {
-    let compressed = unsafe { Mmap::map(&f)? };
+fn decompress(f: &mut File) -> Fallible<Vec<u8>> {
+    let mut compressed = Vec::with_capacity(1 << CHUNKSZ_LOG);
+    f.read_to_end(&mut compressed)?;
+    fadvise(&f, POSIX_FADV_DONTNEED);
     // first 5 bytes contain header
     if compressed[0..5] != MAGIC[..] {
         Err(BackendError::Magic.into())
@@ -70,11 +71,7 @@ impl Backend {
     /// Loads compressed chunk identified by `id`. The chunk is decompressed
     /// on the fly and returned as raw data.
     pub fn load(&self, id: &str) -> Fallible<Vec<u8>> {
-        let f = File::open(self.filename(id))?;
-        f.lock_exclusive()?;
-        fadvise(&f, POSIX_FADV_SEQUENTIAL);
-        let data = decompress(&f)?;
-        fadvise(&f, POSIX_FADV_NOREUSE);
+        let data = decompress(&mut File::open(self.filename(id))?)?;
         if data.len() != 1 << CHUNKSZ_LOG {
             Err(BackendError::Missized(data.len()).into())
         } else {

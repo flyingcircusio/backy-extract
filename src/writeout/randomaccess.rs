@@ -1,6 +1,7 @@
 use super::compat::write_all_at;
-use super::{RawChunk, WriteOut, WriteOutBuilder};
-use crate::{chunk2pos, pos2chunk, PathExt, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{
+    chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK,
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -95,24 +96,37 @@ impl RAWriteOut {
     fn run(
         &self,
         f: &File,
-        rx: &Receiver<RawChunk>,
+        rx: &Receiver<Chunk>,
         prog: &Sender<usize>,
         writer: &(dyn Writer + Send + Sync),
     ) -> Fallible<()> {
-        for chunk in rx {
-            match chunk.data {
-                Some(ref data) => writer.data(&f, chunk.seq, data),
-                None => writer.zero(&f, chunk.seq),
-            }
-            .with_context(|_| WriteChunkErr(chunk.seq, self.path.disp()))?;
-            prog.send(1 << CHUNKSZ_LOG)?;
-        }
-        Ok(())
+        rx.into_iter()
+            .map(|chunk| -> Fallible<()> {
+                match chunk.data {
+                    Data::Some(ref data) => {
+                        for seq in &chunk.seqs {
+                            writer
+                                .data(&f, *seq, data)
+                                .with_context(|_| WriteChunkErr(*seq, self.path.disp()))?;
+                        }
+                    }
+                    Data::Zero => {
+                        for seq in &chunk.seqs {
+                            writer
+                                .zero(&f, *seq)
+                                .with_context(|_| WriteChunkErr(*seq, self.path.disp()))?;
+                        }
+                    }
+                }
+                prog.send(chunk.seqs.len() << CHUNKSZ_LOG)?;
+                Ok(())
+            })
+            .collect()
     }
 }
 
 impl WriteOut for RAWriteOut {
-    fn receive(self, chunks: Receiver<RawChunk>, progress: Sender<usize>) -> Fallible<()> {
+    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()> {
         let (f, guess) = self
             .open()
             .with_context(|_| OutputFileErr(self.path.disp()))?;

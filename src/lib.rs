@@ -4,24 +4,27 @@ mod chunkvec;
 mod test_helper;
 mod writeout;
 
-use self::chunkvec::ChunkVec;
-pub use self::writeout::{RandomAccess, Stream, WriteOut, WriteOutBuilder};
+use self::backend::Backend;
+use self::chunkvec::{ChunkVec, Data};
+pub use self::writeout::{RandomAccess, Stream};
+use self::writeout::{WriteOut, WriteOutBuilder};
 
 use console::{style, StyledObject};
 use crossbeam::channel::{bounded, unbounded, Receiver};
 use crossbeam::thread;
-use failure::{format_err, Fail, Fallible, ResultExt};
+use failure::{Fail, Fallible, ResultExt};
 use fs2::FileExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use lazy_static::lazy_static;
 use memmap::MmapMut;
 use num_cpus;
+use smallvec::SmallVec;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Size of an uncompressed Chunk in the backy store. This value must be a u32 because it is
-/// encoded as 32 bit uint the chunk file header.
+// Size of an uncompressed Chunk in the backy store.
+// This value must be a u32 because it is encoded as 32 bit uint the chunk file header.
 pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
 
 lazy_static! {
@@ -38,19 +41,13 @@ fn chunk2pos(seq: usize) -> u64 {
     (seq as u64) << CHUNKSZ_LOG
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RawChunk {
-    seq: usize,
-    data: Option<Vec<u8>>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Chunk {
+    data: Data,
+    seqs: SmallVec<[usize; 4]>,
 }
 
-#[derive(Debug)]
-pub struct CompressedChunk {
-    seq: usize,
-    data: Vec<u8>,
-}
-
-fn acquire_lock(basedir: &Path) -> Fallible<File> {
+fn purgelock(basedir: &Path) -> Fallible<File> {
     let f = File::create(basedir.join(".purge"))?;
     f.try_lock_exclusive()?;
     Ok(f)
@@ -60,11 +57,11 @@ fn step(i: u32) -> StyledObject<String> {
     style(format!("[{}/4]", i)).blue()
 }
 
-/// Controls the extraction process
+/// Controls the extraction process.
 ///
 /// An `Extractor` must be fed an backy revision specification and a writer. It then
 /// reads chunks from the revision, decompresses them in parallel and dumps them to the
-/// caller-supplied `WriteOut` instance.
+/// caller-supplied writer.
 #[derive(Debug)]
 pub struct Extractor {
     revision: String,
@@ -75,20 +72,19 @@ pub struct Extractor {
 }
 
 impl Extractor {
-    /// Creates new `Extractor` instance
+    /// Creates new `Extractor` instance.
     ///
     /// The revision specification is loaded from `revfile`. The data directory is assumed to be
-    /// the same directory as where revfile is located. If `show_progress` is true, a progress bar
-    /// is displayed on stdout.
+    /// the same directory as where revfile is located.
     pub fn init<P: AsRef<Path>>(revfile: P) -> Fallible<Self> {
         let revfile = revfile.as_ref();
+        let basedir = revfile
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let lock = purgelock(&basedir).with_context(|_| ExtractError::Lock(basedir.disp()))?;
         let revision = fs::read_to_string(revfile)
             .context(ExtractError::LoadSpec(revfile.display().to_string()))?;
-        let basedir = revfile.parent().unwrap().to_path_buf(); // revfile must be != "/" here
-        let lock = acquire_lock(&basedir).context(format_err!(
-            "Cannot lock backup dir `{}'",
-            basedir.display()
-        ))?;
         Ok(Self {
             revision,
             threads: Self::default_threads(),
@@ -99,7 +95,7 @@ impl Extractor {
     }
 
     fn default_threads() -> u8 {
-        num_cpus::get().max(1).min(60) as u8
+        (num_cpus::get() / 2).max(1).min(60) as u8
     }
 
     /// Sets number of decompression threads. Heuristics apply in this method is never called.
@@ -110,7 +106,7 @@ impl Extractor {
         self
     }
 
-    /// Enables a nice progress bar on stderr while restoring.
+    /// Enables/disables a nice progress bar on stderr while restoring.
     pub fn progress(&mut self, show: bool) -> &mut Self {
         self.progress = if show {
             ProgressBar::new(1)
@@ -167,37 +163,44 @@ impl Extractor {
         ));
     }
 
-    /// Initiates the restore process to an already instantiated `writer` object.
+    /// Initiates the restore process.
+    ///
+    /// Accepts a `WriteOutBuilder` which is used to instantiate the final writer. Currently
+    /// supported WriteOutBuilders are [Stream](struct.Stream.html) and
+    /// [RandomAccess](struct.RandomAccess.html).
     pub fn extract<W>(&self, w: W) -> Fallible<()>
     where
         W: WriteOutBuilder,
     {
         self.print_start();
         let start = Instant::now();
+        let be = Backend::open(&self.basedir)?;
         let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
 
         self.print_decompress(chunks.len());
-        let (res, res_rx) = unbounded();
         let (progress, progress_rx) = unbounded();
         let writer = w.build(chunks.size, self.threads);
         let name = writer.name();
 
-        let total_bytes = thread::scope(|s| {
-            let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
-            for t in 0..self.threads {
-                let idx_iter = ((t as usize)..chunks.len()).step_by(self.threads as usize);
-                let chunk_tx = chunk_tx.clone();
-                s.spawn(|_| res.send(chunks.read(Box::new(idx_iter), chunk_tx)));
+        let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
+        let total_bytes = thread::scope(|s| -> Fallible<u64> {
+            let mut hdl = Vec::new();
+            hdl.push(s.spawn(|_| writer.receive(chunk_rx, progress)));
+            for threadid in 0..self.threads {
+                let c_tx = chunk_tx.clone();
+                let sd = |t| (&chunks).send_decompressed(t, self.threads, &be, c_tx);
+                hdl.push(s.spawn(move |_| sd(threadid)));
             }
-            drop(chunk_tx);
-            s.spawn(|_| res.send(writer.receive(chunk_rx, progress)));
-            self.print_progress(chunks.size, &name, progress_rx)
+            hdl.push(s.spawn(|_| (&chunks).send_zero(chunk_tx)));
+            let total_bytes = self.print_progress(chunks.size, &name, progress_rx);
+            hdl.into_iter()
+                .map(|h| h.join().expect("unhandled panic"))
+                .collect::<Fallible<()>>()?;
+            Ok(total_bytes)
         })
-        .expect("subthread panic");
-
-        drop(res);
+        .expect("subthread panic")?;
         self.print_finished(total_bytes, start);
-        res_rx.iter().collect()
+        Ok(())
     }
 }
 
@@ -221,4 +224,6 @@ pub enum ExtractError {
     UnalignedSize(u64),
     #[fail(display = "Unexpected file format in backup dir: {}", _0)]
     BackupFormat(String),
+    #[fail(display = "Failed to acquire purge lock for backup dir `{}'", _0)]
+    Lock(String),
 }
