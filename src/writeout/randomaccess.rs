@@ -1,7 +1,5 @@
 use super::compat::write_all_at;
-use crate::{
-    chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK,
-};
+use crate::{chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -15,6 +13,10 @@ use std::io;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
+/// File/block device restore target.
+///
+/// Chunks are written out-of-order as they are sent to the writer. Zeros are not written (i.e.,
+/// skipped over) if sparse mode is enabled.
 #[derive(Debug, Clone)]
 pub struct RandomAccess {
     path: PathBuf,
@@ -22,6 +24,11 @@ pub struct RandomAccess {
 }
 
 impl RandomAccess {
+    /// Creates a builder which is finalized later by the [Extractor](struct.Extractor.html). If
+    /// the user explicitely requests sparse to be active or not, set `sparse` to some bool. If
+    /// sparse mode is not explicitely set, a heuristic is applied: files which can be truncated
+    /// are written sparsely. Block devices are written sparsely if a patrol read suggests that
+    /// they do not contain previously written data, e.g. after a discard.
     pub fn new<P: AsRef<Path>>(path: P, sparse: Option<bool>) -> Self {
         Self {
             path: path.as_ref().to_owned(),

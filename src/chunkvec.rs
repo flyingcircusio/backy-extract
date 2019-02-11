@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::{pos2chunk, Chunk, ExtractError, CHUNKSZ_LOG};
+use crate::{pos2chunk, Chunk, Data, ExtractError, CHUNKSZ_LOG};
 
 use crossbeam::channel::Sender;
 use failure::{Fail, Fallible, ResultExt};
@@ -29,12 +29,6 @@ impl<'d> Revision<'d> {
         }
         Ok(vec)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Data {
-    Some(Vec<u8>),
-    Zero,
 }
 
 type ChunkMap<'d> = BTreeMap<&'d str, SmallVec<[usize; 4]>>;

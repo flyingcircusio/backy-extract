@@ -1,4 +1,6 @@
-/target
+/dist/
 **/*.rs.bk
 .*.sw?
-tags
+/tags
+/target/
+/tmp/

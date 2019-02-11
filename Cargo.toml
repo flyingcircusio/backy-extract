@@ -5,6 +5,7 @@ authors = ["Christian Kauhaus <kc@flyingcircus.io>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
 license = "BSD-3-Clause"
+repository = "https://github.com/ckauhaus/backy-extract"
 
 [dependencies]
 atty = "0.2"

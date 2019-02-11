@@ -1,3 +1,9 @@
+//! High-performance, multi-threaded backy image restore library.
+//!
+//! `backy_extract` reads an backup revision from a
+//! [backy](https://bitbucket.org/flyingcircus/backy) *chunked v2* data store, decompresses it on
+//! the fly and writes it to a restore target using pluggable writeout modules.
+
 mod backend;
 mod chunkvec;
 #[cfg(test)]
@@ -5,12 +11,11 @@ mod test_helper;
 mod writeout;
 
 use self::backend::Backend;
-use self::chunkvec::{ChunkVec, Data};
+use self::chunkvec::{ChunkVec};
 pub use self::writeout::{RandomAccess, Stream};
-use self::writeout::{WriteOut, WriteOutBuilder};
 
 use console::{style, StyledObject};
-use crossbeam::channel::{bounded, unbounded, Receiver};
+use crossbeam::channel::{bounded, unbounded, Sender, Receiver};
 use crossbeam::thread;
 use failure::{Fail, Fallible, ResultExt};
 use fs2::FileExt;
@@ -19,16 +24,58 @@ use lazy_static::lazy_static;
 use memmap::MmapMut;
 use num_cpus;
 use smallvec::SmallVec;
+use std::fmt::Debug;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-// Size of an uncompressed Chunk in the backy store.
+/// Size of an uncompressed Chunk in the backy store as 2's exponent.
 // This value must be a u32 because it is encoded as 32 bit uint the chunk file header.
 pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
 
 lazy_static! {
     static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(1 << CHUNKSZ_LOG).expect("mmap");
+}
+
+/// WriteOut factory.
+///
+/// We use the factory approach to have only the minimum of parameters to the
+/// user-facing constructor. Further parameters from the Exctractor are supplied internally by
+/// invoking `build` to get the final WriteOut object.
+pub trait WriteOutBuilder {
+    type Impl: WriteOut + Sync + Send;
+    fn build(self, total_size: u64, threads: u8) -> Self::Impl;
+}
+
+/// Abstract writeout (restore) plugin.
+///
+/// A concrete writer is instantiated via `WriteOutBuilder.build()`.
+pub trait WriteOut: Debug {
+    /// Gets an unordered stream of `Chunk`s which must be written to the restore target according
+    /// to the chunks' sequence numbers. Writer must send the number of bytes written to the
+    /// `progress` channel to indicate restore progress in real time.
+    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()>;
+
+    /// Short idenfication for user display. Should contain plugin type and file name.
+    fn name(&self) -> String;
+}
+
+/// Transport of a single image data chunk.
+///
+/// A chunk needs to be placed into all logical positions that are listed in the `seqs` attribute.
+/// Each seq starts at offset (seq << CHUNKSZ_LOG) bytes in the restored image.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Chunk {
+    pub data: Data,
+    pub seqs: SmallVec<[usize; 4]>,
+}
+
+/// Block of uncompressed image contents of length (1 << CHUNKSZ_LOG).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Data {
+    Some(Vec<u8>),
+    /// Shortcut if the whole block consists only of zeros.
+    Zero,
 }
 
 // Converts file position/size into chunk sequence number
@@ -39,12 +86,6 @@ fn pos2chunk(pos: u64) -> usize {
 // Converts chunk sequence number into file offset
 fn chunk2pos(seq: usize) -> u64 {
     (seq as u64) << CHUNKSZ_LOG
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Chunk {
-    data: Data,
-    seqs: SmallVec<[usize; 4]>,
 }
 
 fn purgelock(basedir: &Path) -> Fallible<File> {
@@ -94,16 +135,16 @@ impl Extractor {
         })
     }
 
-    fn default_threads() -> u8 {
-        (num_cpus::get() / 2).max(1).min(60) as u8
-    }
-
     /// Sets number of decompression threads. Heuristics apply in this method is never called.
     pub fn threads(&mut self, n: u8) -> &mut Self {
         if n > 0 {
             self.threads = n
         }
         self
+    }
+
+    fn default_threads() -> u8 {
+        (num_cpus::get() / 2).max(1).min(60) as u8
     }
 
     /// Enables/disables a nice progress bar on stderr while restoring.

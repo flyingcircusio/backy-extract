@@ -1,5 +1,4 @@
-use super::{WriteOut, WriteOutBuilder};
-use crate::{Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{Chunk, Data, WriteOutBuilder, WriteOut, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use failure::Fallible;
@@ -8,6 +7,10 @@ use std::fmt;
 use std::io::Write;
 use std::rc::Rc;
 
+/// Streaming restore target, i.e. write to stdout.
+///
+/// The incoming chunk stream is assembled into sequence order in memory. Chunks are
+/// written out eagerly to keep memory usage to a minimum.
 pub struct Stream<W: ?Sized + Write> {
     out: Box<W>,
 }
