@@ -42,7 +42,6 @@ fn run() -> Fallible<()> {
                 .short("s")
                 .value_name("WHEN")
                 .possible_values(&Sparse::variants())
-                .default_value("auto")
                 .case_insensitive(true)
                 .help("Skips over contiguous regions of NUL bytes"),
         )
@@ -74,7 +73,7 @@ fn run() -> Fallible<()> {
         );
         e.extract(Stream::new(io::stdout()))
     } else {
-        let sparse = value_t!(m, "SPARSE", Sparse).unwrap_or_else(|e| e.exit());
+        let sparse = value_t!(m, "SPARSE", Sparse).unwrap_or(Sparse::Auto);
         e.extract(RandomAccess::new(
             output,
             match sparse {
