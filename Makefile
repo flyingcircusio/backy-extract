@@ -7,7 +7,7 @@ all: release
 
 release: target/release/backy-extract
 
-target/release/backy-extract: src/*.rs src/*/*.rs
+target/release/backy-extract: Cargo.toml src/*.rs src/*/*.rs
 	cargo build --release
 	strip $@
 
