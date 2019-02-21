@@ -1,4 +1,4 @@
-use crate::{Chunk, Data, WriteOutBuilder, WriteOut, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{Chunk, Data, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use failure::Fallible;

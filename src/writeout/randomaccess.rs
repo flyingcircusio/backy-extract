@@ -1,5 +1,7 @@
 use super::compat::write_all_at;
-use crate::{chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{
+    chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK,
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -69,7 +71,7 @@ impl RAWriteOut {
         }
         let mut buf = vec![0; 1 << CHUNKSZ_LOG];
         let mut dev = File::open(&self.path)?;
-        for chunk in SampleIter::new(pos2chunk(self.size)) {
+        for chunk in RandomSample::new(pos2chunk(self.size)) {
             dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;
             dev.read_exact(&mut buf)?;
             if buf != &ZERO_CHUNK[..] {
@@ -166,7 +168,7 @@ impl fmt::Debug for RAWriteOut {
     }
 }
 
-struct SampleIter {
+struct RandomSample {
     chunks: usize,
     i: usize,
     n: usize,
@@ -174,7 +176,7 @@ struct SampleIter {
     rng: ThreadRng,
 }
 
-impl SampleIter {
+impl RandomSample {
     fn new(chunks: usize) -> Self {
         Self {
             chunks,
@@ -186,7 +188,7 @@ impl SampleIter {
     }
 }
 
-impl Iterator for SampleIter {
+impl Iterator for RandomSample {
     type Item = usize;
 
     // Cover the first and last chunk in any case and (n-2) random samples in between

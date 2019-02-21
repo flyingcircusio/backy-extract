@@ -11,11 +11,11 @@ mod test_helper;
 mod writeout;
 
 use self::backend::Backend;
-use self::chunkvec::{ChunkVec};
+use self::chunkvec::ChunkVec;
 pub use self::writeout::{RandomAccess, Stream};
 
 use console::{style, StyledObject};
-use crossbeam::channel::{bounded, unbounded, Sender, Receiver};
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 use crossbeam::thread;
 use failure::{Fail, Fallible, ResultExt};
 use fs2::FileExt;
