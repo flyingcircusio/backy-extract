@@ -100,7 +100,7 @@ fn step(i: u32) -> StyledObject<String> {
 
 /// Controls the extraction process.
 ///
-/// An `Extractor` must be fed an backy revision specification and a writer. It then
+/// An `Extractor` must be initialized with a backy revision specification and a writer. It then
 /// reads chunks from the revision, decompresses them in parallel and dumps them to the
 /// caller-supplied writer.
 #[derive(Debug)]
@@ -216,7 +216,7 @@ impl Extractor {
         self.print_start();
         let start = Instant::now();
         let be = Backend::open(&self.basedir)?;
-        let chunks = ChunkVec::decode(&self.revision, &self.basedir)?;
+        let chunks = ChunkVec::decode(&self.revision)?;
 
         self.print_decompress(chunks.len());
         let (progress, progress_rx) = unbounded();

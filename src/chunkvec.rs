@@ -6,7 +6,6 @@ use failure::{Fail, Fallible, ResultExt};
 use serde_derive::Deserialize;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 // Format of the revision file as deserialized from JSON
 #[derive(Debug, Deserialize)]
@@ -31,6 +30,8 @@ impl<'d> Revision<'d> {
     }
 }
 
+/// Mapping chunk_id (relpath) to list of seq_ids which reference it.
+/// This can be thought of a reverse mapping of what is in the revfile.
 type ChunkMap<'d> = BTreeMap<&'d str, SmallVec<[usize; 4]>>;
 
 /// All chunks of a revision, grouped by chunk ID.
@@ -38,13 +39,15 @@ type ChunkMap<'d> = BTreeMap<&'d str, SmallVec<[usize; 4]>>;
 pub struct ChunkVec<'d> {
     /// Total image size in bytes
     pub size: u64,
+    /// Map chunk_id -> seqs
     chunks: ChunkMap<'d>,
+    /// Empty seqs not found in `chunks`
     zero_seqs: Vec<usize>,
 }
 
 impl<'d> ChunkVec<'d> {
     /// Parses backup spec JSON and constructs chunk map.
-    pub fn decode(input: &'d str, _dir: &Path) -> Fallible<Self> {
+    pub fn decode(input: &'d str) -> Fallible<Self> {
         let rev: Revision<'d> =
             serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
         let size = rev.size;
@@ -88,6 +91,7 @@ impl<'d> ChunkVec<'d> {
             .skip(threadid as usize)
             .step_by(nthreads as usize)
             .collect();
+        // lowest seq_ids first
         ids.sort_unstable_by_key(|e| e.1[0]);
         for (id, seqs) in ids {
             let decompressed = backend
