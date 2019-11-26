@@ -6,6 +6,7 @@
 
 mod backend;
 mod chunkvec;
+mod randomaccess;
 #[cfg(test)]
 mod test_helper;
 mod writeout;

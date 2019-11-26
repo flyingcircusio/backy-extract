@@ -25,7 +25,7 @@ lazy_static! {
 }
 
 fn decompress(f: &mut File) -> Fallible<Vec<u8>> {
-    let mut compressed = Vec::with_capacity(1 << CHUNKSZ_LOG);
+    let mut compressed = Vec::with_capacity(1 << (CHUNKSZ_LOG - 1));
     f.read_to_end(&mut compressed)?;
     fadvise(&f, POSIX_FADV_DONTNEED);
     // first 5 bytes contain header

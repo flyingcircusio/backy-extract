@@ -51,25 +51,6 @@ fn restore_rev_with_holes() -> Fallible<()> {
 }
 
 #[test]
-fn chunk_over_size() {
-    let (_store, rev) = store_with_rev(
-        r#"
-{"mapping": {"0": "4db6e194fd398e8edb76e11054d73eb0", "1": "c72b4ba82d1f51b71c8a18195ad33fc8",
-             "2": "c72b4ba82d1f51b71c8a18195ad33fc8", "3": "c72b4ba82d1f51b71c8a18195ad33fc8"},
- "size": 12582912}"#,
-    );
-    let e = Extractor::init(rev).unwrap();
-    if let Err(err) = e.extract(Stream::new(&mut Vec::new())) {
-        assert_eq!(
-            err.downcast::<ExtractError>().unwrap(),
-            ExtractError::OutOfBounds(3, 3)
-        );
-    } else {
-        panic!("expected ExtractError::OutOfBounds");
-    }
-}
-
-#[test]
 fn unaligned_size() {
     let (_store, rev) = store_with_rev(
         r#"{"mapping": {"0": "4db6e194fd398e8edb76e11054d73eb0"}, "size": 1234567}"#,

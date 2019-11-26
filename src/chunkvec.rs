@@ -3,52 +3,86 @@ use crate::{pos2chunk, Chunk, Data, ExtractError, CHUNKSZ_LOG};
 
 use crossbeam::channel::Sender;
 use failure::{Fail, Fallible, ResultExt};
-use serde_derive::Deserialize;
+use serde::Deserialize;
+use smallstr::SmallString;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
+use std::iter::IntoIterator;
+
+pub type ChunkID = SmallString<[u8; 32]>;
 
 // Format of the revision file as deserialized from JSON
 #[derive(Debug, Deserialize)]
-struct Revision<'d> {
+pub struct RevisionMap<'d> {
     #[serde(borrow)]
     mapping: HashMap<&'d str, &'d str>,
     size: u64,
 }
 
-impl<'d> Revision<'d> {
-    fn into_vec(mut self) -> Fallible<Vec<Option<&'d str>>> {
-        let max_chunks = pos2chunk(self.size);
-        let mut vec = vec![None; max_chunks];
-        for (chunknum, relpath) in self.mapping.drain() {
-            let n = chunknum.parse::<usize>()?;
-            if n >= max_chunks {
-                return Err(ExtractError::OutOfBounds(n, max_chunks).into());
-            }
-            vec[n] = Some(relpath);
+impl<'d> IntoIterator for RevisionMap<'d> {
+    type Item = (usize, Option<ChunkID>);
+    type IntoIter = RevisionMapIterator<'d>;
+
+    fn into_iter(self) -> RevisionMapIterator<'d> {
+        RevisionMapIterator::new(self)
+    }
+}
+
+pub struct RevisionMapIterator<'d> {
+    map: HashMap<usize, &'d str>,
+    i: usize,
+    max: usize,
+}
+
+impl<'d> RevisionMapIterator<'d> {
+    fn new(map: RevisionMap<'d>) -> Self {
+        let max = pos2chunk(map.size);
+        Self {
+            map: map
+                .mapping
+                .into_iter()
+                .map(|(k, v)| (k.parse().expect("numeric key"), v))
+                .collect(),
+            i: 0,
+            max,
         }
-        Ok(vec)
+    }
+}
+
+impl<'d> Iterator for RevisionMapIterator<'d> {
+    type Item = (usize, Option<ChunkID>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.i;
+        self.i += 1;
+        if i < self.max {
+            let id: Option<ChunkID> = self.map.remove(&i).map(From::from);
+            Some((i, id))
+        } else {
+            None
+        }
     }
 }
 
 /// Mapping chunk_id (relpath) to list of seq_ids which reference it.
 /// This can be thought of a reverse mapping of what is in the revfile.
-type ChunkMap<'d> = BTreeMap<&'d str, SmallVec<[usize; 4]>>;
+type ChunkMap = BTreeMap<ChunkID, SmallVec<[usize; 4]>>;
 
 /// All chunks of a revision, grouped by chunk ID.
 #[derive(Debug, Clone)]
-pub struct ChunkVec<'d> {
+pub struct ChunkVec {
     /// Total image size in bytes
     pub size: u64,
     /// Map chunk_id -> seqs
-    chunks: ChunkMap<'d>,
+    chunks: ChunkMap,
     /// Empty seqs not found in `chunks`
     zero_seqs: Vec<usize>,
 }
 
-impl<'d> ChunkVec<'d> {
+impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
-    pub fn decode(input: &'d str) -> Fallible<Self> {
-        let rev: Revision<'d> =
+    pub fn decode<'d>(input: &'d str) -> Fallible<Self> {
+        let rev: RevisionMap<'d> =
             serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
         let size = rev.size;
         if size % (1 << CHUNKSZ_LOG) != 0 {
@@ -56,7 +90,7 @@ impl<'d> ChunkVec<'d> {
         }
         let mut chunks = BTreeMap::new();
         let mut zero_seqs = Vec::new();
-        for (seq, id) in rev.into_vec()?.into_iter().enumerate() {
+        for (seq, id) in rev {
             if let Some(id) = id {
                 chunks.entry(id).or_insert_with(SmallVec::new).push(seq);
             } else {
@@ -85,7 +119,7 @@ impl<'d> ChunkVec<'d> {
         tx: Sender<Chunk>,
     ) -> Fallible<()> {
         assert!(nthreads > 0 && threadid < nthreads);
-        let mut ids: Vec<(&&str, &SmallVec<[usize; 4]>)> = self
+        let mut ids: Vec<(&ChunkID, &SmallVec<[usize; 4]>)> = self
             .chunks
             .iter()
             .skip(threadid as usize)
@@ -123,9 +157,11 @@ struct ChunkError {
     id: String,
 }
 
-fn chunk_error(seq: usize, id: &str) -> ChunkError {
+fn chunk_error(seq: usize, id: &ChunkID) -> ChunkError {
     ChunkError {
         seq,
-        id: id.to_owned(),
+        id: id.to_string(),
     }
 }
+
+// XXX unit tests
