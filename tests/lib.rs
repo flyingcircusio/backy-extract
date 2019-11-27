@@ -7,7 +7,7 @@ use std::fs::{read, remove_file};
 
 #[test]
 fn restore_to_stream() -> Fallible<()> {
-    let store = store();
+    let store = store_tar();
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
     for t in &[1, 2] {
@@ -21,7 +21,7 @@ fn restore_to_stream() -> Fallible<()> {
 
 #[test]
 fn restore_to_file() -> Fallible<()> {
-    let store = store();
+    let store = store_tar();
     let tgt = store.path().join("target_image");
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();

@@ -22,7 +22,7 @@ pub fn image() -> Vec<u8> {
     buf
 }
 
-pub fn store() -> TempDir {
+pub fn store_tar() -> TempDir {
     let tmp = TempDir::new("store").expect("create tempdir");
     Archive::new(File::open(FIXTURES.join("store.tar")).unwrap())
         .unpack(&tmp)
@@ -32,7 +32,7 @@ pub fn store() -> TempDir {
 
 #[allow(dead_code)]
 pub fn store_with_rev(json: &str) -> (TempDir, PathBuf) {
-    let tmp = store();
+    let tmp = store_tar();
     let rev = tmp.path().join("REV0000000000000000000");
     write(&rev, &json).expect("write revspec");
     (tmp, rev)

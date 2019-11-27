@@ -16,7 +16,7 @@ pub type ChunkID = SmallString<[u8; 32]>;
 pub struct RevisionMap<'d> {
     #[serde(borrow)]
     mapping: HashMap<&'d str, &'d str>,
-    size: u64,
+    pub size: u64,
 }
 
 impl<'d> IntoIterator for RevisionMap<'d> {
