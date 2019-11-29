@@ -71,7 +71,7 @@ impl Backend {
         let s = read_to_string(dir.join("chunks/store")).map_err(|_| Error::NotFound)?;
         let version_tag = s.trim();
         if version_tag != "v2" {
-            Err(Error::VersionTag(version_tag.to_owned()).into())
+            Err(Error::VersionTag(version_tag.to_owned()))
         } else {
             Ok(Self {
                 dir: dir.to_owned(),
@@ -91,7 +91,7 @@ impl Backend {
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
         let data = decompress(&mut File::open(self.filename(id))?)?;
         if data.len() != 1 << CHUNKSZ_LOG {
-            Err(Error::Missized(data.len()).into())
+            Err(Error::Missized(data.len()))
         } else {
             Ok(data)
         }

@@ -6,13 +6,15 @@
 
 mod backend;
 mod chunkvec;
-mod fuse;
+mod fuse_access;
 #[cfg(test)]
 mod test_helper;
 mod writeout;
 
 use self::backend::Backend;
 use self::chunkvec::ChunkVec;
+#[cfg(feature = "fuse_driver")]
+pub use self::fuse_access::{FuseAccess, FuseDirectory};
 pub use self::writeout::{RandomAccess, Stream};
 use console::{style, StyledObject};
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
@@ -308,10 +310,10 @@ mod test {
                     r#"backend_type: chunked
 parent: JZ3zfSHq24Fy5ENgTgYLGF
 stats:
-bytes_written: {written}
-ceph-verification: partial
-chunk_stats: {{write_full: {nchunks}, write_partial: 0}}
-duration: 216.60814833641052
+    bytes_written: {written}
+    ceph-verification: partial
+    chunk_stats: {{write_full: {nchunks}, write_partial: 0}}
+    duration: 216.60814833641052
 tags: [daily]
 timestamp: 2019-11-14 14:21:18.289+00:00
 trust: trusted

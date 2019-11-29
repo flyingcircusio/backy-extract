@@ -16,6 +16,7 @@ console = "0.7"
 crossbeam = "0.7"
 env_logger = "0.7"
 failure = "0.1" # XXX remove
+fnv = "1"
 fs2 = "0.4"
 indicatif = "0.11"
 lazy_static = "1.2"
@@ -35,10 +36,11 @@ smallvec = "0.6"
 snafu = "0.6" # XXX remove
 structopt = "0.3"
 thiserror = "1"
+time = { version = "0.1", optional = true }
 
 [features]
 default = []
-fuse_driver = []
+fuse_driver = ["fuse", "time"]
 
 [[bin]]
 name = "backy-fuse"

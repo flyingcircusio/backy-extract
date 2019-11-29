@@ -1,27 +1,31 @@
+///! Fuse-driven access to revisions with in-memory COW
 use crate::backend::{self, Backend};
-/// Fuse-driven access to revisions with in-memory COW
 use crate::chunkvec::{ChunkID, RevisionMap};
 use crate::{pos2chunk, RevID, CHUNKSZ_LOG, ZERO_CHUNK};
 use chrono::{DateTime, TimeZone, Utc};
+use fnv::FnvHashMap as HashMap;
 use serde::{Deserialize, Deserializer};
 use std::cmp::min;
-use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+
+static ID_SEQ: AtomicU64 = AtomicU64::new(2);
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("I/O error")]
     IO(#[from] io::Error),
-    #[error("Invalid data in .rev file {path:?}")]
+    #[error("Invalid data in .rev file '{}'", path.display())]
     ParseRev {
         path: PathBuf,
         source: serde_yaml::Error,
     },
-    #[error("Invalid data in chunk map file {path:?}")]
+    #[error("Invalid data in chunk map file '{}'", path.display())]
     ParseMap {
         path: PathBuf,
         source: serde_json::Error,
@@ -30,6 +34,8 @@ pub enum Error {
     Backend(#[from] backend::Error),
     #[error("Unknown backend_type '{}' found in {}", betype, path.display())]
     WrongType { betype: String, path: PathBuf },
+    #[error("Invalid revision file name '{}'", path.display())]
+    InvalidName { path: PathBuf },
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -47,16 +53,11 @@ impl fmt::Debug for Page {
 struct Cache {
     seq: usize,
     data: Page,
-    cow: HashMap<usize, Page>,
 }
 
 impl Cache {
     fn new(seq: usize, data: Page) -> Self {
-        Self {
-            seq,
-            data,
-            cow: HashMap::new(),
-        }
+        Self { seq, data }
     }
 
     fn update(&mut self, seq: usize, data: Page) {
@@ -74,7 +75,7 @@ where
     Ok(RevID::from_string(String::deserialize(deserializer)?))
 }
 
-static TIMESTAMP_FORMAT: &'static str = "%Y-%m-%d %H:%M:%S%.f%z";
+static TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f%z";
 fn timestamp_de<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
 where
     D: Deserializer<'de>,
@@ -84,15 +85,22 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Rev {
-    backend_type: String,
+pub struct RevStats {
+    pub bytes_written: u64,
+    pub duration: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Rev {
+    pub backend_type: String,
     #[serde(deserialize_with = "revid_de")]
-    parent: RevID,
+    pub parent: RevID,
+    pub stats: RevStats,
     #[serde(deserialize_with = "timestamp_de")]
-    timestamp: DateTime<Utc>,
-    trust: String,
+    pub timestamp: DateTime<Utc>,
+    pub trust: String,
     #[serde(deserialize_with = "revid_de")]
-    uuid: RevID,
+    pub uuid: RevID,
 }
 
 impl Rev {
@@ -108,27 +116,26 @@ impl Rev {
             return Err(Error::WrongType {
                 betype: r.backend_type.to_owned(),
                 path: rev.to_owned(),
-            }
-            .into());
+            });
         }
         Ok(r)
     }
 }
 
-#[derive(Debug)]
-pub struct FuseAccess {
-    rev: Rev,
-    size: u64,
-    map: Chunks,
-    backend: Backend,
-    cache: Option<Cache>,
-}
-
 fn copy(target: &mut [u8], source: &[u8], offset: usize) -> usize {
-    assert!(offset < source.len(), "offset if beyond data.len()");
     let n = min(target.len(), source.len() - offset);
     target[0..n].clone_from_slice(&source[offset..(offset + n)]);
     n
+}
+
+#[derive(Debug, Clone)]
+pub struct FuseAccess {
+    pub rev: Rev,
+    pub size: u64,
+    map: Chunks,
+    backend: Backend,
+    cache: Option<Cache>,
+    cow: HashMap<usize, Page>,
 }
 
 const OFFSET_MASK: u64 = (1 << CHUNKSZ_LOG) - 1;
@@ -154,23 +161,28 @@ impl FuseAccess {
             map,
             backend,
             cache: None,
+            cow: HashMap::default(),
         })
     }
 
-    fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
+    pub fn file_name(&self) -> &OsStr {
+        OsStr::new(self.rev.uuid.as_str())
+    }
+
+    pub fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
         if offset > self.size {
             return Err(
-                io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond image length").into(),
+                io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond end of image").into(),
             );
         } else if offset == self.size {
             return Ok(0);
         }
         let seq = pos2chunk(offset);
         let off = (offset & OFFSET_MASK) as usize;
+        if let Some(page) = self.cow.get(&seq) {
+            return Ok(copy(buf, &page.0, off));
+        }
         if let Some(cache) = &self.cache {
-            if let Some(page) = cache.cow.get(&seq) {
-                return Ok(copy(buf, &page.0, off));
-            }
             if seq == cache.seq {
                 return Ok(copy(buf, &cache.data.0, off));
             }
@@ -188,6 +200,74 @@ impl FuseAccess {
             Ok(copy(buf, &ZERO_CHUNK, 0))
         }
     }
+
+    pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
+        if offset >= self.size {
+            return Err(
+                io::Error::new(io::ErrorKind::UnexpectedEof, "write beyond end of image").into(),
+            );
+        }
+        let seq = pos2chunk(offset);
+        let off = (offset & OFFSET_MASK) as usize;
+        // split large writes that go over a page boundary
+        if pos2chunk(offset + buf.len() as u64 - 1) != seq {
+            let in_first_chunk = (1 << CHUNKSZ_LOG) - off;
+            return self
+                .write_at(offset, &buf[..in_first_chunk])
+                .and_then(|written| {
+                    Ok(written
+                        + self.write_at(offset + in_first_chunk as u64, &&buf[in_first_chunk..])?)
+                });
+        }
+        assert!(off + buf.len() <= 1 << CHUNKSZ_LOG);
+        if let Some(page) = self.cow.get_mut(&seq) {
+            page.0[off..off + buf.len()].clone_from_slice(buf);
+        } else {
+            let mut p = vec![0u8; 1 << CHUNKSZ_LOG];
+            self.read_at(&mut p, offset)?;
+            p[off..off + buf.len()].clone_from_slice(buf);
+            self.cow.insert(seq, Page(p.into_boxed_slice()));
+        }
+        Ok(buf.len())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FuseDirectory {
+    pub basedir: PathBuf,
+    revs: HashMap<u64, FuseAccess>,
+}
+
+impl FuseDirectory {
+    pub fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
+        let mut d = Self {
+            basedir: dir.as_ref().to_owned(),
+            revs: HashMap::default(),
+        };
+        for entry in fs::read_dir(&dir)? {
+            let e = entry?;
+            let p = e.path();
+            if p.extension().unwrap_or_default() == "rev" {
+                let ino = ID_SEQ.fetch_add(1, Ordering::SeqCst);
+                let mut rid = e
+                    .file_name()
+                    .into_string()
+                    .or_else(|_| Err(Error::InvalidName { path: p.to_owned() }))?;
+                rid.truncate(rid.len() - 4);
+                let f = FuseAccess::new(&dir, &rid)?;
+                d.revs.insert(ino, f);
+            }
+        }
+        Ok(d)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&u64, &FuseAccess)> {
+        self.revs.iter()
+    }
+
+    pub fn get(&self, ino: u64) -> Option<&FuseAccess> {
+        self.revs.get(&ino)
+    }
 }
 
 #[cfg(test)]
@@ -198,12 +278,7 @@ mod test {
 
     #[test]
     fn initialize_rev() -> Result<()> {
-        let s = store(hashmap! {
-            rid("pqEKi7Jfq4bps3NVNEU49K") => vec![
-                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; 1<<CHUNKSZ_LOG])),
-                Some((cid("53c234e5e8472b6ac51c1ae1cab3fe06"), vec![2u8; 1<<CHUNKSZ_LOG]))
-            ]
-        });
+        let s = store(hashmap! {rid("pqEKi7Jfq4bps3NVNEU49K") => vec![]});
         let rev = Rev::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         assert_eq!(
             rev.timestamp,
@@ -244,10 +319,11 @@ mod test {
         assert!(fuse.cache.is_none());
         assert_eq!(fuse.read_at(&mut buf, 0)?, read_size);
         assert_eq!(&buf, &vec![1u8; read_size]);
-        assert!(fuse.cache.is_some());
+        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
         // empty chunk -> zeroes
         assert_eq!(fuse.read_at(&mut buf, 1 << CHUNKSZ_LOG)?, read_size);
         assert_eq!(&buf, &vec![0; read_size]);
+        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
         // another chunk
         assert_eq!(fuse.read_at(&mut buf, 2 << CHUNKSZ_LOG)?, read_size);
         assert_eq!(&buf, &vec![3u8; read_size]);
@@ -260,7 +336,7 @@ mod test {
         // offset > len
         assert!(fuse.read_at(&mut buf, (3 << CHUNKSZ_LOG) + 1).is_err());
         // nothing should have ended up in the COW map
-        assert!(fuse.cache.unwrap().cow.is_empty());
+        assert!(fuse.cow.is_empty());
         Ok(())
     }
 
@@ -302,18 +378,56 @@ mod test {
     fn write_cow() -> Result<()> {
         let s = store(hashmap! {
             rid("XmE1MThjMDZmMWQ5Y2JkMG") => vec![
-                Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![11u8; 1<<CHUNKSZ_LOG])),
-                Some((cid("01fb50e6c86fae1679ef3351296fd671"), vec![12u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![10u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("01fb50e6c86fae1679ef3351296fd671"), vec![11u8; 1<<CHUNKSZ_LOG])),
             ]
         });
         let mut fuse = FuseAccess::new(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
         let mut buf = vec![0; 5];
-        assert_eq!(fuse.read_at(&mut buf, 0)?, 5);
-        assert_eq!(&buf, &[11, 11, 11, 11, 11]);
+        assert!(fuse.cow.is_empty());
+        // write at beginning boundary
         assert_eq!(fuse.write_at(0, &[0, 1, 2, 3])?, 4);
         assert_eq!(fuse.read_at(&mut buf, 0)?, 5);
-        assert_eq!(&buf, &[0, 1, 2, 3, 11]);
+        assert_eq!(&buf, &[0, 1, 2, 3, 10]);
+        // write at page boundary
+        assert_eq!(fuse.write_at((1 << CHUNKSZ_LOG) - 4, &[0, 1, 2, 3])?, 4);
+        assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) - 5)?, 5);
+        assert_eq!(&buf, &[10, 0, 1, 2, 3]);
+        // -> should not have loaded page 1 into the cache!
+        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
         // write over page boundary
+        assert_eq!(fuse.write_at((1 << CHUNKSZ_LOG) - 2, &[4, 5, 6, 7])?, 4);
+        assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) - 4)?, 4);
+        assert_eq!(
+            &buf[0..4],
+            &[
+                0, 1, // from last write
+                4, 5, // newly written to page 0
+            ]
+        );
+        assert_eq!(fuse.read_at(&mut buf, 1 << CHUNKSZ_LOG)?, 5);
+        assert_eq!(
+            &buf,
+            &[
+                6, 7, // newly written to page 1
+                11, 11, 11
+            ]
+        ); // original contents of page 1
+           // write over EOF
+        assert!(fuse
+            .write_at((2 << CHUNKSZ_LOG) - 2, &[4, 5, 6, 7])
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn write_cow_empty_page() -> Result<()> {
+        let s = store(hashmap! {rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None]});
+        let mut fuse = FuseAccess::new(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
+        assert_eq!(fuse.write_at(2, &[1])?, 1);
+        let mut buf = vec![0; 5];
+        assert_eq!(fuse.read_at(&mut buf, 0)?, 5);
+        assert_eq!(&buf, &[0, 0, 1, 0, 0]);
         Ok(())
     }
 
