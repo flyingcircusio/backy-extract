@@ -1,4 +1,5 @@
-///! Fuse-driven access to revisions with in-memory COW
+//! Fuse-driven access to revisions with in-memory COW
+
 use crate::backend::{self, Backend};
 use crate::chunkvec::{ChunkID, RevisionMap};
 use crate::{pos2chunk, RevID, CHUNKSZ_LOG, ZERO_CHUNK};
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
-static ID_SEQ: AtomicU64 = AtomicU64::new(2);
+static ID_SEQ: AtomicU64 = AtomicU64::new(4);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -30,8 +31,13 @@ pub enum Error {
         path: PathBuf,
         source: serde_json::Error,
     },
-    #[error("Chunked backend error")]
+    #[error("Failed to open data store")]
     Backend(#[from] backend::Error),
+    #[error("Failed to load data chunk {chunk_id:?}")]
+    BackendLoad {
+        chunk_id: ChunkID,
+        source: backend::Error,
+    },
     #[error("Unknown backend_type '{}' found in {}", betype, path.display())]
     WrongType { betype: String, path: PathBuf },
     #[error("Invalid revision file name '{}'", path.display())]
@@ -130,6 +136,7 @@ fn copy(target: &mut [u8], source: &[u8], offset: usize) -> usize {
 
 #[derive(Debug, Clone)]
 pub struct FuseAccess {
+    pub path: PathBuf,
     pub rev: Rev,
     pub size: u64,
     map: Chunks,
@@ -143,19 +150,20 @@ const OFFSET_MASK: u64 = (1 << CHUNKSZ_LOG) - 1;
 impl FuseAccess {
     fn new<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
         let dir = dir.as_ref();
-        let map = dir.join(id.as_ref());
+        let path = dir.join(id.as_ref());
         let rev = Rev::load(dir, id)?;
         let backend = Backend::open(dir)?;
         // XXX lazy map loading?
-        let revmap_s = fs::read_to_string(&map)?;
+        let revmap_s = fs::read_to_string(&path)?;
         let revmap: RevisionMap =
             serde_json::from_str(&revmap_s).map_err(|source| Error::ParseMap {
-                path: map.to_path_buf(),
+                path: path.to_owned(),
                 source,
             })?;
         let size = revmap.size;
         let map = revmap.into_iter().map(|(_seq, id)| id).collect();
         Ok(Self {
+            path,
             rev,
             size,
             map,
@@ -165,10 +173,16 @@ impl FuseAccess {
         })
     }
 
+    #[allow(unused)]
     pub fn file_name(&self) -> &OsStr {
-        OsStr::new(self.rev.uuid.as_str())
+        OsStr::new(
+            self.path
+                .file_name()
+                .expect("Internal error: revision without path"),
+        )
     }
 
+    #[allow(unused)]
     pub fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
         if offset > self.size {
             return Err(
@@ -188,7 +202,13 @@ impl FuseAccess {
             }
         }
         if let Some(chunk_id) = self.map[seq].clone() {
-            let data = self.backend.load(chunk_id.as_str())?;
+            let data = self
+                .backend
+                .load(chunk_id.as_str())
+                .map_err(|e| Error::BackendLoad {
+                    chunk_id,
+                    source: e,
+                })?;
             let n = copy(buf, &data, off);
             if let Some(cache) = &mut self.cache {
                 cache.update(seq, Page(data.into_boxed_slice()));
@@ -201,6 +221,7 @@ impl FuseAccess {
         }
     }
 
+    #[allow(unused)]
     pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
         if offset >= self.size {
             return Err(
@@ -239,6 +260,7 @@ pub struct FuseDirectory {
 }
 
 impl FuseDirectory {
+    #[allow(unused)]
     pub fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
         let mut d = Self {
             basedir: dir.as_ref().to_owned(),
@@ -246,27 +268,44 @@ impl FuseDirectory {
         };
         for entry in fs::read_dir(&dir)? {
             let e = entry?;
-            let p = e.path();
+            let p = PathBuf::from(e.file_name());
             if p.extension().unwrap_or_default() == "rev" {
                 let ino = ID_SEQ.fetch_add(1, Ordering::SeqCst);
-                let mut rid = e
-                    .file_name()
-                    .into_string()
-                    .or_else(|_| Err(Error::InvalidName { path: p.to_owned() }))?;
-                rid.truncate(rid.len() - 4);
-                let f = FuseAccess::new(&dir, &rid)?;
+                let rid = p
+                    .file_stem()
+                    .ok_or_else(|| Error::InvalidName { path: p.to_owned() })?
+                    .to_str()
+                    .ok_or_else(|| Error::InvalidName { path: p.to_owned() })?;
+                let f = FuseAccess::new(&dir, rid)?;
                 d.revs.insert(ino, f);
             }
         }
         Ok(d)
     }
 
+    #[allow(unused)]
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &FuseAccess)> {
         self.revs.iter()
     }
 
+    #[allow(unused)]
     pub fn get(&self, ino: u64) -> Option<&FuseAccess> {
         self.revs.get(&ino)
+    }
+
+    #[allow(unused)]
+    pub fn get_mut(&mut self, ino: u64) -> Option<&mut FuseAccess> {
+        self.revs.get_mut(&ino)
+    }
+
+    #[allow(unused)]
+    pub fn len(&self) -> usize {
+        self.revs.len()
+    }
+
+    #[allow(unused)]
+    pub fn is_empty(&self) -> bool {
+        self.revs.is_empty()
     }
 }
 

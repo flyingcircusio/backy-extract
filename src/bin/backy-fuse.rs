@@ -6,8 +6,9 @@ use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
     FUSE_ROOT_ID,
 };
-use libc::{EINVAL, ENOENT, ENOTDIR};
+use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -39,7 +40,7 @@ static ROOT_NODE: FileAttr = FileAttr {
 fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
     let timestamp = Timespec::new(entry.rev.timestamp.timestamp(), 0);
     FileAttr {
-        ino: ino,
+        ino,
         size: entry.size,
         blocks: (entry.rev.stats.bytes_written + 511) / 512,
         atime: timestamp,
@@ -87,15 +88,13 @@ impl Filesystem for BackyFS {
                 if let Some(entry) = self.dir.get(*ino) {
                     re.entry(&TTL, &fileattr(*ino, entry), 0)
                 } else {
-                    error!(
-                        "lookup(): '{}' -> inode {} -> no entry found",
-                        path.display(),
-                        ino
+                    panic!(
+                        "Internal error: lookup({:?}) -> inode {} -> no entry found",
+                        name, ino
                     );
-                    re.error(EINVAL)
                 }
             } else {
-                warn!("lookup(): '{}' not found", path.display());
+                info!("lookup(): '{}' not found", path.display());
                 re.error(ENOENT);
             }
         }
@@ -121,11 +120,16 @@ impl Filesystem for BackyFS {
             return;
         }
         if offset == 0 {
-            re.add(1, 1, FileType::Directory, ".");
-            re.add(1, 2, FileType::Directory, "..");
+            re.add(FUSE_ROOT_ID, 1, FileType::Directory, ".");
+            re.add(FUSE_ROOT_ID, 2, FileType::Directory, "..");
         }
-        if offset >= 2 {
-            for (n, (ino, entry)) in self.dir.iter().enumerate().skip((offset - 2) as usize) {
+        if offset < (self.dir.len() as i64) + 2 {
+            for (n, (ino, entry)) in self
+                .dir
+                .iter()
+                .enumerate()
+                .skip((offset - 2).max(0) as usize)
+            {
                 re.add(
                     *ino,
                     (n + 3) as i64,
@@ -136,13 +140,36 @@ impl Filesystem for BackyFS {
         }
         re.ok()
     }
+
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, re: ReplyData) {
+        if ino == FUSE_ROOT_ID {
+            error!("read(): trying to open directory as regular file");
+            re.error(EINVAL);
+            return;
+        }
+        if let Some(entry) = self.dir.get_mut(ino) {
+            // global buffer XXX
+            let size = size as usize;
+            let mut buf = vec![0; size];
+            match entry.read_at(&mut buf[..size], offset.try_into().unwrap()) {
+                Ok(n) => re.data(&buf[..n]),
+                Err(e) => {
+                    error!("read({}@{}): {}", ino, offset, e);
+                    re.error(EIO)
+                }
+            }
+        } else {
+            info!("read({}): not found", ino);
+            re.error(ENOENT);
+        }
+    }
 }
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "Exports all backup images in a FUSE filesystem")]
 struct App {
-    /// Backy base directory [example: /srv/backy]
-    #[structopt(short, long, default_value = ".")]
+    /// Backy base directory
+    #[structopt(short = "d", long, default_value = "/srv/backy")]
     basedir: PathBuf,
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
     mountpoint: PathBuf,
@@ -153,5 +180,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     let app = App::from_args();
     let fs = BackyFS::init(&app.basedir)?;
-    fuse::mount(fs, &app.mountpoint, &[&OsStr::new("-ofsname=backy")]).map_err(Into::into)
+    fuse::mount(
+        fs,
+        &app.mountpoint,
+        // XXX make allow_root optional
+        &[&OsStr::new("-ofsname=backy,allow_root")],
+    )
+    .map_err(Into::into)
 }

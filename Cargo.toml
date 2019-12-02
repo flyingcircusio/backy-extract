@@ -18,9 +18,9 @@ env_logger = "0.7"
 failure = "0.1" # XXX remove
 fnv = "1"
 fs2 = "0.4"
+fuse = { version = "0.3", optional = true }
 indicatif = "0.11"
 lazy_static = "1.2"
-fuse = { version = "0.3", optional = true }
 libc = "0.2"
 log = "0.4"
 memmap = "0.7"
@@ -28,12 +28,11 @@ minilzo = "0.2"
 num_cpus = "1.9"
 parking_lot = "0.7"
 rand = "0.6"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.8"
 smallstr = "0.1"
 smallvec = "0.6"
-snafu = "0.6" # XXX remove
 structopt = "0.3"
 thiserror = "1"
 time = { version = "0.1", optional = true }
