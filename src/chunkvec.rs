@@ -1,8 +1,7 @@
 use crate::backend::Backend;
-use crate::{pos2chunk, Chunk, Data, ExtractError, CHUNKSZ_LOG};
+use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ_LOG};
 
 use crossbeam::channel::Sender;
-use failure::{Fail, Fallible, ResultExt};
 use serde::Deserialize;
 use smallstr::SmallString;
 use smallvec::SmallVec;
@@ -81,12 +80,12 @@ pub struct ChunkVec {
 
 impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
-    pub fn decode<'d>(input: &'d str) -> Fallible<Self> {
+    pub fn decode<'d>(input: &'d str) -> Result<Self> {
         let rev: RevisionMap<'d> =
-            serde_json::from_str(input).with_context(|_| ExtractError::LoadSpec(input.into()))?;
+            serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
         if size % (1 << CHUNKSZ_LOG) != 0 {
-            return Err(ExtractError::UnalignedSize(rev.size).into());
+            return Err(ExtractError::UnalignedSize(rev.size));
         }
         let mut chunks = BTreeMap::new();
         let mut zero_seqs = Vec::new();
@@ -117,7 +116,7 @@ impl ChunkVec {
         nthreads: u8,
         backend: &Backend,
         tx: Sender<Chunk>,
-    ) -> Fallible<()> {
+    ) -> Result<()> {
         assert!(nthreads > 0 && threadid < nthreads);
         let mut ids: Vec<(&ChunkID, &SmallVec<[usize; 4]>)> = self
             .chunks
@@ -128,9 +127,11 @@ impl ChunkVec {
         // lowest seq_ids first
         ids.sort_unstable_by_key(|e| e.1[0]);
         for (id, seqs) in ids {
-            let decompressed = backend
-                .load(id)
-                .with_context(|_| chunk_error(seqs[0], id))?;
+            let decompressed = backend.load(id).map_err(|e| ExtractError::InvalidChunk {
+                seq: seqs[0],
+                id: id.to_string(),
+                source: e,
+            })?;
             tx.send(Chunk {
                 data: Data::Some(decompressed),
                 seqs: seqs.clone(),
@@ -139,7 +140,7 @@ impl ChunkVec {
         Ok(())
     }
 
-    pub fn send_zero(&self, tx: Sender<Chunk>) -> Fallible<()> {
+    pub fn send_zero(&self, tx: Sender<Chunk>) -> Result<()> {
         if !self.zero_seqs.is_empty() {
             tx.send(Chunk {
                 data: Data::Zero,
@@ -147,20 +148,6 @@ impl ChunkVec {
             })?;
         }
         Ok(())
-    }
-}
-
-#[derive(Fail, Debug, PartialEq, Eq)]
-#[fail(display = "Error while loading chunk #{} ({})", seq, id)]
-struct ChunkError {
-    seq: usize,
-    id: String,
-}
-
-fn chunk_error(seq: usize, id: &ChunkID) -> ChunkError {
-    ChunkError {
-        seq,
-        id: id.to_string(),
     }
 }
 

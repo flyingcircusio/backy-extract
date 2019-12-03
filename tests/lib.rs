@@ -1,12 +1,12 @@
 mod helper;
 
+use anyhow::{ensure, Result};
 use backy_extract::*;
-use failure::{ensure, Fallible};
 use helper::*;
 use std::fs::{read, remove_file};
 
 #[test]
-fn restore_to_stream() -> Fallible<()> {
+fn restore_to_stream() -> Result<()> {
     let store = store_tar();
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
     let expected = image();
@@ -20,7 +20,7 @@ fn restore_to_stream() -> Fallible<()> {
 }
 
 #[test]
-fn restore_to_file() -> Fallible<()> {
+fn restore_to_file() -> Result<()> {
     let store = store_tar();
     let tgt = store.path().join("target_image");
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
@@ -39,7 +39,7 @@ fn restore_to_file() -> Fallible<()> {
 }
 
 #[test]
-fn restore_rev_with_holes() -> Fallible<()> {
+fn restore_rev_with_holes() -> Result<()> {
     let (_store, rev) = store_with_rev(
         r#"{"mapping": {"0": "4db6e194fd398e8edb76e11054d73eb0"}, "size": 16777216}"#,
     );
@@ -56,12 +56,8 @@ fn unaligned_size() {
         r#"{"mapping": {"0": "4db6e194fd398e8edb76e11054d73eb0"}, "size": 1234567}"#,
     );
     let e = Extractor::init(rev).unwrap();
-    if let Err(err) = e.extract(Stream::new(&mut Vec::new())) {
-        assert_eq!(
-            err.downcast::<ExtractError>().unwrap(),
-            ExtractError::UnalignedSize(1234567)
-        );
-    } else {
-        panic!("expected ExtractError::OutOfBounds");
+    match e.extract(Stream::new(&mut Vec::new())) {
+        Err(ExtractError::UnalignedSize(n)) => assert_eq!(n, 1234567),
+        _ => panic!("expected ExtractError::UnalignedSize"),
     }
 }

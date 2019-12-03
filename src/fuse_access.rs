@@ -5,6 +5,7 @@ use crate::chunkvec::{ChunkID, RevisionMap};
 use crate::{pos2chunk, RevID, CHUNKSZ_LOG, ZERO_CHUNK};
 use chrono::{DateTime, TimeZone, Utc};
 use fnv::FnvHashMap as HashMap;
+use log::{debug, info};
 use serde::{Deserialize, Deserializer};
 use std::cmp::min;
 use std::ffi::OsStr;
@@ -40,8 +41,11 @@ pub enum Error {
     },
     #[error("Unknown backend_type '{}' found in {}", betype, path.display())]
     WrongType { betype: String, path: PathBuf },
-    #[error("Invalid revision file name '{}'", path.display())]
-    InvalidName { path: PathBuf },
+    #[error("Invalid revision file name '{}'", .0.display())]
+    InvalidName(PathBuf),
+    #[error("'{}' contains no revision or no chunks - is this really a backy directory?",
+            .0.display())]
+    NoRevisions(PathBuf),
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -153,27 +157,51 @@ impl FuseAccess {
         let path = dir.join(id.as_ref());
         let rev = Rev::load(dir, id)?;
         let backend = Backend::open(dir)?;
-        // XXX lazy map loading?
-        let revmap_s = fs::read_to_string(&path)?;
-        let revmap: RevisionMap =
-            serde_json::from_str(&revmap_s).map_err(|source| Error::ParseMap {
-                path: path.to_owned(),
-                source,
-            })?;
-        let size = revmap.size;
-        let map = revmap.into_iter().map(|(_seq, id)| id).collect();
         Ok(Self {
             path,
             rev,
-            size,
-            map,
+            size: 0,     // initialized by load()
+            map: vec![], // initialized by load()
             backend,
             cache: None,
             cow: HashMap::default(),
         })
     }
 
+    #[cfg(test)]
+    fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
+        let mut res = Self::new(dir, id)?;
+        res.load_map()?;
+        Ok(res)
+    }
+
     #[allow(unused)]
+    /// Loads chunk map from basedir
+    ///
+    /// Returns number of chunks found in the map. This function is idempotent: If the map is
+    /// already initialized, nothing happens.
+    pub fn load_if_empty(&mut self) -> Result<()> {
+        if self.map.is_empty() {
+            let n = self.load_map()?;
+            debug!("Loaded {} chunks from chunk map {:?}", n, self.file_name());
+        }
+        Ok(())
+    }
+
+    fn load_map(&mut self) -> Result<usize> {
+        let revmap_s = fs::read_to_string(&self.path)?;
+        let revmap: RevisionMap =
+            serde_json::from_str(&revmap_s).map_err(|source| Error::ParseMap {
+                path: self.path.to_owned(),
+                source,
+            })?;
+        self.size = revmap.size;
+        self.map = revmap.into_iter().map(|(_seq, id)| id).collect();
+        Ok(self.map.len())
+    }
+
+    #[allow(unused)]
+    /// Returns the local path name of the map/revision file (relative to basedir)
     pub fn file_name(&self) -> &OsStr {
         OsStr::new(
             self.path
@@ -202,6 +230,7 @@ impl FuseAccess {
             }
         }
         if let Some(chunk_id) = self.map[seq].clone() {
+            info!("{:?}: load seq {}", self.file_name(), seq);
             let data = self
                 .backend
                 .load(chunk_id.as_str())
@@ -246,6 +275,7 @@ impl FuseAccess {
         } else {
             let mut p = vec![0u8; 1 << CHUNKSZ_LOG];
             self.read_at(&mut p, offset)?;
+            info!("{:?}: clone into cow", self.file_name());
             p[off..off + buf.len()].clone_from_slice(buf);
             self.cow.insert(seq, Page(p.into_boxed_slice()));
         }
@@ -262,8 +292,9 @@ pub struct FuseDirectory {
 impl FuseDirectory {
     #[allow(unused)]
     pub fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
+        let dir = dir.as_ref();
         let mut d = Self {
-            basedir: dir.as_ref().to_owned(),
+            basedir: dir.to_owned(),
             revs: HashMap::default(),
         };
         for entry in fs::read_dir(&dir)? {
@@ -273,14 +304,18 @@ impl FuseDirectory {
                 let ino = ID_SEQ.fetch_add(1, Ordering::SeqCst);
                 let rid = p
                     .file_stem()
-                    .ok_or_else(|| Error::InvalidName { path: p.to_owned() })?
+                    .ok_or_else(|| Error::InvalidName(p.to_owned()))?
                     .to_str()
-                    .ok_or_else(|| Error::InvalidName { path: p.to_owned() })?;
+                    .ok_or_else(|| Error::InvalidName(p.to_owned()))?;
                 let f = FuseAccess::new(&dir, rid)?;
                 d.revs.insert(ino, f);
             }
         }
-        Ok(d)
+        if !d.is_empty() && dir.join("chunks").exists() {
+            Ok(d)
+        } else {
+            Err(Error::NoRevisions(PathBuf::from(dir)))
+        }
     }
 
     #[allow(unused)]
@@ -335,7 +370,7 @@ mod test {
                 None
             ]
         });
-        let ra = FuseAccess::new(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
+        let ra = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         assert_eq!(
             ra.map,
             &[Some(cid("4355a46b19d348dc2f57c046f8ef63d4")), None]
@@ -352,7 +387,7 @@ mod test {
                 Some((cid("1121cfccd5913f0a63fec40a6ffd44ea"), vec![3u8; 1<<CHUNKSZ_LOG])),
             ]
         });
-        let mut fuse = FuseAccess::new(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
+        let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         let read_size = 1 << (CHUNKSZ_LOG - 3);
         let mut buf = vec![0; read_size];
         assert!(fuse.cache.is_none());
@@ -387,7 +422,7 @@ mod test {
                 None,
             ]
         });
-        let mut fuse = FuseAccess::new(s.path(), "pqEKi7Jfq4bps3NVNEU400")?;
+        let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU400")?;
         let mut buf = vec![0; 1 << CHUNKSZ_LOG];
         assert_eq!(fuse.read_at(&mut buf, 0)?, 1 << CHUNKSZ_LOG);
         assert_eq!(&buf, &vec![0; 1 << CHUNKSZ_LOG]);
@@ -406,7 +441,7 @@ mod test {
                 Some((cid("a1fb50e6c86fae1679ef3351296fd671"), data)),
             ]
         });
-        let mut fuse = FuseAccess::new(s.path(), "MmE1MThjMDZmMWQ5Y2JkMG")?;
+        let mut fuse = FuseAccess::load(s.path(), "MmE1MThjMDZmMWQ5Y2JkMG")?;
         let mut buf = [0u8; 8];
         assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) + 4)?, 8);
         assert_eq!(&buf, &[4, 5, 6, 7, 8, 9, 11, 11]);
@@ -421,7 +456,7 @@ mod test {
                 Some((cid("01fb50e6c86fae1679ef3351296fd671"), vec![11u8; 1<<CHUNKSZ_LOG])),
             ]
         });
-        let mut fuse = FuseAccess::new(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
+        let mut fuse = FuseAccess::load(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
         let mut buf = vec![0; 5];
         assert!(fuse.cow.is_empty());
         // write at beginning boundary
@@ -462,7 +497,7 @@ mod test {
     #[test]
     fn write_cow_empty_page() -> Result<()> {
         let s = store(hashmap! {rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None]});
-        let mut fuse = FuseAccess::new(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
+        let mut fuse = FuseAccess::load(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
         assert_eq!(fuse.write_at(2, &[1])?, 1);
         let mut buf = vec![0; 5];
         assert_eq!(fuse.read_at(&mut buf, 0)?, 5);

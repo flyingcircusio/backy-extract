@@ -8,6 +8,7 @@ license = "BSD-3-Clause"
 repository = "https://github.com/ckauhaus/backy-extract"
 
 [dependencies]
+anyhow = "1"
 atty = "0.2"
 byteorder = "1.2"
 chrono = "0.4"
@@ -15,7 +16,6 @@ clap = { version = "2.32", features = ["wrap_help"] }
 console = "0.7"
 crossbeam = "0.7"
 env_logger = "0.7"
-failure = "0.1" # XXX remove
 fnv = "1"
 fs2 = "0.4"
 fuse = { version = "0.3", optional = true }

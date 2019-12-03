@@ -16,10 +16,11 @@ use self::chunkvec::ChunkVec;
 #[cfg(feature = "fuse_driver")]
 pub use self::fuse_access::{FuseAccess, FuseDirectory};
 pub use self::writeout::{RandomAccess, Stream};
+use self::writeout::{WriteOut, WriteOutBuilder};
+
 use console::{style, StyledObject};
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, unbounded, Receiver};
 use crossbeam::thread;
-use failure::{Fail, Fallible, ResultExt};
 use fs2::FileExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use lazy_static::lazy_static;
@@ -29,38 +30,45 @@ use smallstr::SmallString;
 use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ExtractError {
+    #[error("Failed to load revision spec '{0}'")]
+    LoadSpec(PathBuf, #[source] io::Error),
+    #[error("Failed to parse revision map JSON: {0}")]
+    DecodeMap(String, #[source] serde_json::Error),
+    #[error("Image size {0} is not a multiple of chunk size")]
+    UnalignedSize(u64),
+    #[error("Unexpected file format in backup dir '{}'", .0.display())]
+    BackupFormat(PathBuf),
+    #[error("Failed to acquire purge lock for backup dir '{}'", .0.display())]
+    Lock(PathBuf, #[source] io::Error),
+    #[error("Error while loading chunk #{seq} ({id})")]
+    InvalidChunk {
+        seq: usize,
+        id: String,
+        source: backend::Error,
+    },
+    #[error("Chunked backend error")]
+    Backend(#[from] backend::Error),
+    #[error("IPC error")]
+    SendChunk(#[from] crossbeam::SendError<Chunk>),
+    #[error("Write error")]
+    WriteError(#[from] writeout::Error),
+}
+
+type Result<T, E = ExtractError> = std::result::Result<T, E>;
 
 /// Size of an uncompressed Chunk in the backy store as 2's exponent.
-// This value must be a u32 because it is encoded as 32 bit uint the chunk file header.
+// The resulting value must be a u32 because it is encoded as 32 bit uint the chunk file header.
 pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
 
 lazy_static! {
     static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(1 << CHUNKSZ_LOG).expect("mmap");
-}
-
-/// WriteOut factory.
-///
-/// We use the factory approach to have only the minimum of parameters to the
-/// user-facing constructor. Further parameters from the Exctractor are supplied internally by
-/// invoking `build` to get the final WriteOut object.
-pub trait WriteOutBuilder {
-    type Impl: WriteOut + Sync + Send;
-    fn build(self, total_size: u64, threads: u8) -> Self::Impl;
-}
-
-/// Abstract writeout (restore) plugin.
-///
-/// A concrete writer is instantiated via `WriteOutBuilder.build()`.
-pub trait WriteOut: Debug {
-    /// Gets an unordered stream of `Chunk`s which must be written to the restore target according
-    /// to the chunks' sequence numbers. Writer must send the number of bytes written to the
-    /// `progress` channel to indicate restore progress in real time.
-    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()>;
-
-    /// Short idenfication for user display. Should contain plugin type and file name.
-    fn name(&self) -> String;
 }
 
 /// Transport of a single image data chunk.
@@ -93,7 +101,8 @@ fn chunk2pos(seq: usize) -> u64 {
 
 type RevID = SmallString<[u8; 24]>;
 
-fn purgelock(basedir: &Path) -> Fallible<File> {
+/// Aqcuire 'purge' lock which prevents backy from deleting chunks
+pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
     let f = File::create(basedir.join(".purge"))?;
     f.try_lock_exclusive()?;
     Ok(f)
@@ -122,15 +131,15 @@ impl Extractor {
     ///
     /// The revision specification is loaded from `revfile`. The data directory is assumed to be
     /// the same directory as where revfile is located.
-    pub fn init<P: AsRef<Path>>(revfile: P) -> Fallible<Self> {
+    pub fn init<P: AsRef<Path>>(revfile: P) -> Result<Self> {
         let revfile = revfile.as_ref();
         let basedir = revfile
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let lock = purgelock(&basedir).with_context(|_| ExtractError::Lock(basedir.disp()))?;
+        let lock = purgelock(&basedir).map_err(|e| ExtractError::Lock(basedir.clone(), e))?;
         let revision = fs::read_to_string(revfile)
-            .context(ExtractError::LoadSpec(revfile.display().to_string()))?;
+            .map_err(|e| ExtractError::LoadSpec(revfile.to_owned(), e))?;
         Ok(Self {
             revision,
             threads: Self::default_threads(),
@@ -214,7 +223,7 @@ impl Extractor {
     /// Accepts a `WriteOutBuilder` which is used to instantiate the final writer. Currently
     /// supported WriteOutBuilders are [Stream](struct.Stream.html) and
     /// [RandomAccess](struct.RandomAccess.html).
-    pub fn extract<W>(&self, w: W) -> Fallible<()>
+    pub fn extract<W>(&self, w: W) -> Result<()>
     where
         W: WriteOutBuilder,
     {
@@ -229,9 +238,9 @@ impl Extractor {
         let name = writer.name();
 
         let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
-        let total_bytes = thread::scope(|s| -> Fallible<u64> {
+        let total_bytes = thread::scope(|s| -> Result<u64> {
             let mut hdl = Vec::new();
-            hdl.push(s.spawn(|_| writer.receive(chunk_rx, progress)));
+            hdl.push(s.spawn(|_| writer.receive(chunk_rx, progress).map_err(Into::into)));
             for threadid in 0..self.threads {
                 let c_tx = chunk_tx.clone();
                 let sd = |t| (&chunks).send_decompressed(t, self.threads, &be, c_tx);
@@ -241,37 +250,13 @@ impl Extractor {
             let total_bytes = self.print_progress(chunks.size, &name, progress_rx);
             hdl.into_iter()
                 .map(|h| h.join().expect("unhandled panic"))
-                .collect::<Fallible<()>>()?;
+                .collect::<Result<()>>()?;
             Ok(total_bytes)
         })
         .expect("subthread panic")?;
         self.print_finished(total_bytes, start);
         Ok(())
     }
-}
-
-trait PathExt {
-    fn disp(&self) -> String;
-}
-
-impl PathExt for Path {
-    fn disp(&self) -> String {
-        format!("{}", style(self.display()).yellow())
-    }
-}
-
-#[derive(Fail, Debug, PartialEq, Eq)]
-pub enum ExtractError {
-    #[fail(display = "Failed to load revision spec `{}'", _0)]
-    LoadSpec(String),
-    #[fail(display = "Chunk #{} is out of bounds (0..{})", _0, _1)]
-    OutOfBounds(usize, usize),
-    #[fail(display = "Image size {} is not a multiple of chunk size", _0)]
-    UnalignedSize(u64),
-    #[fail(display = "Unexpected file format in backup dir: {}", _0)]
-    BackupFormat(String),
-    #[fail(display = "Failed to acquire purge lock for backup dir `{}'", _0)]
-    Lock(String),
 }
 
 #[cfg(test)]

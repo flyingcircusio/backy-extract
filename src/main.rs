@@ -5,11 +5,10 @@
 #[macro_use]
 extern crate clap;
 
+use anyhow::{ensure, Context, Result};
 use atty::{self, Stream::Stdout};
 use backy_extract::{Extractor, RandomAccess, Stream};
 use clap::{app_from_crate, crate_authors, crate_description, crate_name, crate_version, Arg};
-use console::style;
-use failure::{ensure, Fallible, ResultExt};
 use std::ffi::OsStr;
 use std::io;
 
@@ -27,7 +26,7 @@ arg_enum! {
     }
 }
 
-fn run() -> Fallible<()> {
+fn main() -> Result<()> {
     let m = app_from_crate!()
         .arg(
             Arg::with_name("THREADS")
@@ -71,7 +70,7 @@ fn run() -> Fallible<()> {
             atty::isnt(Stdout),
             "cowardly refusing to restore to the terminal"
         );
-        e.extract(Stream::new(io::stdout()))
+        e.extract(Stream::new(io::stdout()))?;
     } else {
         let sparse = value_t!(m, "SPARSE", Sparse).unwrap_or(Sparse::Auto);
         e.extract(RandomAccess::new(
@@ -81,16 +80,7 @@ fn run() -> Fallible<()> {
                 Sparse::Never => Some(false),
                 Sparse::Auto => None,
             },
-        ))
+        ))?;
     }
-}
-
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("{} {}", style("Error:").red().bold(), e);
-        for cause in e.iter_causes() {
-            eprintln!("{} {}", style("Cause:").yellow().bold(), cause);
-        }
-        std::process::exit(1);
-    }
+    Ok(())
 }

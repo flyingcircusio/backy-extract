@@ -1,16 +1,14 @@
-use super::compat::write_all_at;
-use crate::{
-    chunk2pos, pos2chunk, Chunk, Data, PathExt, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK,
-};
+use super::{Error, Result, WriteOut, WriteOutBuilder};
+use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
-use failure::{Fail, Fallible, ResultExt};
 use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand::rngs::ThreadRng;
 use std::fmt;
 use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::io;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
@@ -83,17 +81,16 @@ impl RAWriteOut {
 
     // Opens restore target (file/dev) as stated in self.path. Resizes file accordingly and gives a
     // guess if sparse mode can be used or not.
-    fn open(&self) -> Fallible<(File, bool)> {
+    fn open(&self) -> Result<(File, bool), io::Error> {
         let mut f = File::create(&self.path)?;
         let sparse_guess = match f.set_len(self.size) {
             Err(err) => {
                 if err.raw_os_error().unwrap_or_default() == 22 {
                     // 22 (Invalid argument): cannot resize block devices
-                    self.guess_sparse()
-                        .context("Patrol read failed (is the restore device large enough?)")?
+                    self.guess_sparse()?
                 } else {
                     // truncate failed with errno != 22 => we're borked
-                    return Err(err.into());
+                    return Err(err);
                 }
             }
             Ok(_) => true,
@@ -108,22 +105,22 @@ impl RAWriteOut {
         rx: &Receiver<Chunk>,
         prog: &Sender<usize>,
         writer: &(dyn Writer + Send + Sync),
-    ) -> Fallible<()> {
+    ) -> Result<()> {
         rx.into_iter()
-            .map(|chunk| -> Fallible<()> {
+            .map(|chunk| -> Result<()> {
                 match chunk.data {
                     Data::Some(ref data) => {
                         for seq in &chunk.seqs {
-                            writer
-                                .data(&f, *seq, data)
-                                .with_context(|_| WriteChunkErr(*seq, self.path.disp()))?;
+                            writer.data(&f, *seq, data).map_err(|e| {
+                                Error::WriteChunkFile(*seq, self.path.to_owned(), e)
+                            })?;
                         }
                     }
                     Data::Zero => {
                         for seq in &chunk.seqs {
-                            writer
-                                .zero(&f, *seq)
-                                .with_context(|_| WriteChunkErr(*seq, self.path.disp()))?;
+                            writer.zero(&f, *seq).map_err(|e| {
+                                Error::WriteChunkFile(*seq, self.path.to_owned(), e)
+                            })?;
                         }
                     }
                 }
@@ -135,10 +132,10 @@ impl RAWriteOut {
 }
 
 impl WriteOut for RAWriteOut {
-    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()> {
+    fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Result<()> {
         let (f, guess) = self
             .open()
-            .with_context(|_| OutputFileErr(self.path.disp()))?;
+            .map_err(|e| Error::OutputFile(self.path.to_owned(), e))?;
         let writer: Box<dyn Writer + Send + Sync> = if self.sparse.unwrap_or(guess) {
             Box::new(Sparse)
         } else {
@@ -151,7 +148,7 @@ impl WriteOut for RAWriteOut {
             handles
                 .into_iter()
                 .map(|hdl| hdl.join().expect("thread panic"))
-                .collect::<Result<(), _>>()
+                .collect::<Result<()>>()
         })
         .expect("subthread panic")?;
         Ok(())
@@ -216,11 +213,11 @@ struct Continuous;
 
 impl Writer for Continuous {
     fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
-        write_all_at(f, data, chunk2pos(seq))
+        f.write_all_at(data, chunk2pos(seq))
     }
 
     fn zero(&self, f: &File, seq: usize) -> io::Result<()> {
-        write_all_at(f, &ZERO_CHUNK, chunk2pos(seq))
+        f.write_all_at(&ZERO_CHUNK, chunk2pos(seq))
     }
 }
 
@@ -233,7 +230,7 @@ impl Writer for Sparse {
         let mut pos = chunk2pos(seq);
         for slice in data.chunks(BLKSIZE) {
             if slice != &ZERO_CHUNK[..BLKSIZE] {
-                write_all_at(f, slice, pos)?;
+                f.write_all_at(slice, pos)?;
             }
             pos += BLKSIZE as u64;
         }
@@ -244,14 +241,6 @@ impl Writer for Sparse {
         Ok(())
     }
 }
-
-#[derive(Fail, Debug)]
-#[fail(display = "Failed to open output file `{}'", _0)]
-struct OutputFileErr(String);
-
-#[derive(Fail, Debug)]
-#[fail(display = "Failed to write chunk #{} to `{}'", _0, _1)]
-struct WriteChunkErr(usize, String);
 
 #[cfg(test)]
 mod tests {

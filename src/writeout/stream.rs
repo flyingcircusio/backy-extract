@@ -1,7 +1,7 @@
-use crate::{Chunk, Data, WriteOut, WriteOutBuilder, CHUNKSZ_LOG, ZERO_CHUNK};
+use super::{Error, Result, WriteOut, WriteOutBuilder};
+use crate::{Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
-use failure::Fallible;
 use std::collections::BinaryHeap;
 use std::fmt;
 use std::io::Write;
@@ -30,18 +30,20 @@ impl<W: Write + Send + Sync> Stream<W> {
         Self { out: Box::new(out) }
     }
 
-    fn write(&mut self, data: &Data, prog: &Sender<usize>) -> Fallible<()> {
-        self.out.write_all(match data {
-            Data::Some(d) => d,
-            Data::Zero => &ZERO_CHUNK,
-        })?;
-        prog.send(1 << CHUNKSZ_LOG)?;
+    fn write(&mut self, data: &Data, seq: usize, progress: &Sender<usize>) -> Result<()> {
+        self.out
+            .write_all(match data {
+                Data::Some(d) => d,
+                Data::Zero => &ZERO_CHUNK,
+            })
+            .map_err(|e| Error::WriteChunk(seq, e))?;
+        progress.send(1 << CHUNKSZ_LOG)?;
         Ok(())
     }
 }
 
 impl<W: Write + Send + Sync> WriteOut for Stream<W> {
-    fn receive(mut self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Fallible<()> {
+    fn receive(mut self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Result<()> {
         let mut queue = Queue::new();
         let mut expect_seq = 0;
         for chunk in chunks {
@@ -51,7 +53,7 @@ impl<W: Write + Send + Sync> WriteOut for Stream<W> {
                 .into_iter()
                 .for_each(|seq| queue.put(seq, Rc::clone(&data)));
             while let Some(d) = queue.get(expect_seq) {
-                self.write(&d, &progress)?;
+                self.write(&d, expect_seq, &progress)?;
                 expect_seq += 1;
             }
         }
@@ -126,14 +128,15 @@ mod tests {
     }
 
     #[test]
-    fn reorder() -> Fallible<()> {
+    fn reorder() -> Result<()> {
         let mut buf = Vec::with_capacity(4 * CS);
         let (raw, raw_rx) = unbounded();
         for &i in &[1, 3, 0, 2] {
             raw.send(Chunk {
                 seqs: smallvec![i],
                 data: Data::Some(CHUNKS[i].to_vec()),
-            })?
+            })
+            .expect("cannot send chunks");
         }
         drop(raw);
         let s = Stream::new(&mut buf);

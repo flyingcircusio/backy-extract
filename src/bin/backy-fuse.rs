@@ -1,18 +1,17 @@
 #[macro_use]
 extern crate log;
 
-use backy_extract::{FuseAccess, FuseDirectory};
+use anyhow::{Context, Result};
+use backy_extract::{purgelock, FuseAccess, FuseDirectory};
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
-    FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
+    ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::error::Error;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use time::Timespec;
 
@@ -60,22 +59,24 @@ fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
 struct BackyFS {
     dir: FuseDirectory,
     reverse: HashMap<OsString, u64>,
+    buf: Vec<u8>,
 }
 
 impl BackyFS {
-    fn init<P: AsRef<Path>>(dir: P) -> Result<Self, Box<dyn Error>> {
+    fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
         let dir = FuseDirectory::init(dir)?;
         let mut reverse = HashMap::new();
         for (ino, entry) in dir.iter() {
             reverse.insert(entry.file_name().to_owned(), *ino);
         }
-        Ok(Self { dir, reverse })
+        let buf = Vec::with_capacity(1 << 15);
+        Ok(Self { dir, reverse, buf })
     }
 }
 
 impl Filesystem for BackyFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, re: ReplyEntry) {
-        if parent != 1 {
+        if parent != FUSE_ROOT_ID {
             warn!("lookup(): trying to use an invalid base directory");
             re.error(ENOENT);
             return;
@@ -85,8 +86,14 @@ impl Filesystem for BackyFS {
         } else {
             let path = PathBuf::from(name);
             if let Some(ino) = self.reverse.get(name) {
-                if let Some(entry) = self.dir.get(*ino) {
-                    re.entry(&TTL, &fileattr(*ino, entry), 0)
+                if let Some(entry) = self.dir.get_mut(*ino) {
+                    match entry.load_if_empty() {
+                        Ok(_) => re.entry(&TTL, &fileattr(*ino, entry), 0),
+                        Err(e) => {
+                            error!("lookup({:?}): {}", name, e);
+                            re.error(EINVAL);
+                        }
+                    }
                 } else {
                     panic!(
                         "Internal error: lookup({:?}) -> inode {} -> no entry found",
@@ -141,50 +148,128 @@ impl Filesystem for BackyFS {
         re.ok()
     }
 
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, re: ReplyData) {
+    fn open(&mut self, _req: &Request, ino: u64, _flags: u32, re: ReplyOpen) {
         if ino == FUSE_ROOT_ID {
-            error!("read(): trying to open directory as regular file");
+            error!("read(): trying to access directory as regular file");
             re.error(EINVAL);
             return;
         }
         if let Some(entry) = self.dir.get_mut(ino) {
-            // global buffer XXX
-            let size = size as usize;
-            let mut buf = vec![0; size];
-            match entry.read_at(&mut buf[..size], offset.try_into().unwrap()) {
-                Ok(n) => re.data(&buf[..n]),
+            match entry.load_if_empty() {
+                Ok(_) => re.opened(0, 0),
                 Err(e) => {
-                    error!("read({}@{}): {}", ino, offset, e);
+                    error!("open(0x{:x}: {}", ino, e);
+                    re.error(EINVAL);
+                }
+            }
+        } else {
+            info!("open(0x{:x}): not found", ino);
+            re.error(ENOENT);
+        }
+    }
+
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, re: ReplyData) {
+        if ino == FUSE_ROOT_ID {
+            error!("read(): trying to access directory as regular file");
+            re.error(EINVAL);
+            return;
+        }
+        if let Some(entry) = self.dir.get_mut(ino) {
+            let size = size as usize;
+            if self.buf.len() < size {
+                self.buf.resize(size, 0);
+            }
+            match entry.read_at(&mut self.buf[..size], offset.try_into().unwrap()) {
+                Ok(n) => re.data(&self.buf[..n]),
+                Err(e) => {
+                    error!("read(0x{:x} @ {}): {}", ino, offset, e);
                     re.error(EIO)
                 }
             }
         } else {
-            info!("read({}): not found", ino);
+            info!("read(0x{:x}): not found", ino);
+            re.error(ENOENT);
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _flags: u32,
+        re: ReplyWrite,
+    ) {
+        if ino == FUSE_ROOT_ID {
+            error!("write(): trying to write to the directory");
+            re.error(EINVAL);
+            return;
+        }
+        if let Some(entry) = self.dir.get_mut(ino) {
+            match entry.write_at(offset.try_into().unwrap(), &data) {
+                Ok(n) if n == data.len() => re.written(n.try_into().expect("overflow")),
+                Ok(n) => {
+                    error!(
+                        "write(0x{:x} @ {}): short write ({} of {})",
+                        ino,
+                        offset,
+                        n,
+                        data.len()
+                    );
+                    re.error(EIO)
+                }
+                Err(e) => {
+                    error!("write(0x{:x} @ {}): {}", ino, offset, e);
+                    re.error(EIO)
+                }
+            }
+        } else {
+            info!("write(0x{:x}): not found", ino);
             re.error(ENOENT);
         }
     }
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "Exports all backup images in a FUSE filesystem")]
+/// Access backy images via FUSE
+///
+/// backy-fuse maps all revisions for a specific target under a FUSE
+/// mountpoint. These can be loop-mounted to extract individual files.
 struct App {
     /// Backy base directory
-    #[structopt(short = "d", long, default_value = "/srv/backy")]
+    ///
+    /// Example: /srv/backy/vm0
+    #[structopt(short = "d", long, default_value = ".")]
     basedir: PathBuf,
+    /// FUSE mount options
+    ///
+    /// See fuse(8) for possible values. Accepts multiple comma-separated
+    /// values.
+    #[structopt(short = "o", long, default_value = "allow_root")]
+    mountopts: Vec<String>,
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
     mountpoint: PathBuf,
 }
 
-// XXX anyhow
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     env_logger::init();
     let app = App::from_args();
+    let lock = purgelock(&app.basedir).context("Failed to acquire .purge lock")?;
+    info!("Loading revisions");
     let fs = BackyFS::init(&app.basedir)?;
     fuse::mount(
         fs,
         &app.mountpoint,
-        // XXX make allow_root optional
-        &[&OsStr::new("-ofsname=backy,allow_root")],
+        &[&OsStr::new(&format!(
+            "-ofsname=backy,{}",
+            app.mountopts.join(",")
+        ))],
     )
-    .map_err(Into::into)
+    .context("Failed to mount FUSE filesystem")?;
+    drop(lock);
+    Ok(())
 }
+
+// XXX tests missing
