@@ -206,9 +206,6 @@ impl FuseAccess {
             })?;
         self.size = revmap.size;
         self.map = revmap.into_iter().map(|(_seq, id)| id).collect();
-        if let Some(initial_cache) = self.load_page(0) {
-            self.cache.update(0, initial_cache?);
-        }
         Ok(self.map.len())
     }
 
@@ -228,11 +225,8 @@ impl FuseAccess {
     #[allow(unused)]
     pub fn read_at(&mut self, offset: u64, size: usize) -> Result<&[u8]> {
         if offset > self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "read beyond end of image",
-            )
-            .into());
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond end of image")
+                .into());
         } else if offset == self.size {
             return Ok(&[]);
         }
@@ -243,7 +237,7 @@ impl FuseAccess {
             return Ok(&page[off..end]);
         }
         if self.map[seq].is_some() {
-            if seq == self.cache.seq {
+            if seq == self.cache.seq && !self.cache.data.is_empty() {
                 return Ok(&self.cache.data[off..end]);
             }
             info!("{:?}: load seq {}", self.name(), seq);
@@ -396,31 +390,32 @@ mod test {
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
-        let read_size = 1 << (CHUNKSZ_LOG - 3);
+        const READ_SIZE: usize = 1 << (CHUNKSZ_LOG - 3);
+        assert!(fuse.cache.data.is_empty());
         assert_eq!(
-            *fuse.read_at(2 << CHUNKSZ_LOG, read_size)?,
-            *vec![3u8; read_size]
+            *fuse.read_at(2 << CHUNKSZ_LOG, READ_SIZE)?,
+            *vec![3u8; READ_SIZE]
         );
         assert_eq!(fuse.cache.seq, 2);
         assert_eq!(*fuse.cache.data, *vec![3u8; 1 << CHUNKSZ_LOG]);
         // empty chunk -> zeroes
         assert_eq!(
-            *fuse.read_at(1 << CHUNKSZ_LOG, read_size)?,
-            *vec![0; read_size]
+            *fuse.read_at(1 << CHUNKSZ_LOG, READ_SIZE)?,
+            *vec![0; READ_SIZE]
         );
         assert_eq!(fuse.cache.seq, 2);
         // another chunk
-        assert!(fuse.read_at(0, read_size).is_ok());
+        assert!(fuse.read_at(0, READ_SIZE).is_ok());
         assert_eq!(fuse.cache.seq, 0);
         // read over the end -> short read
         assert_eq!(
-            fuse.read_at((3 << CHUNKSZ_LOG) - 32, read_size)?,
+            fuse.read_at((3 << CHUNKSZ_LOG) - 32, READ_SIZE)?,
             &[3u8; 32]
         );
         // read at end -> []
-        assert!(fuse.read_at(3 << CHUNKSZ_LOG, read_size)?.is_empty());
+        assert!(fuse.read_at(3 << CHUNKSZ_LOG, READ_SIZE)?.is_empty());
         // offset > len
-        assert!(fuse.read_at(3 << CHUNKSZ_LOG + 1, read_size).is_err());
+        assert!(fuse.read_at(3 << CHUNKSZ_LOG + 1, READ_SIZE).is_err());
         // nothing should have ended up in the COW map
         assert!(fuse.cow.is_empty());
         Ok(())
@@ -500,7 +495,7 @@ mod test {
                 2, 3, 4 // original contents of page 1
             ]
         );
-        // write over EOF XXX
+        // write over EOF
         assert!(fuse
             .write_at((2 << CHUNKSZ_LOG) - 2, &[4, 5, 6, 7])
             .is_err());
@@ -516,6 +511,44 @@ mod test {
         Ok(())
     }
 
-    // XXX Test: missing files
-    // XXX Test: format error
+    #[test]
+    fn missing_chunk() -> Result<()> {
+        let s = store(hashmap! {
+            rid("missingjMDZmMWQ5Y2JkMG") => vec![
+                Some((cid("7d0eae958fb3a9889774603cd049716b"), vec![1u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("95d2a0ce9869d4ec1395b7a7c8fae0c9"), vec![2u8; 1<<CHUNKSZ_LOG])),
+            ]
+        });
+        fs::remove_file(
+            s.path()
+                .join("chunks/95/95d2a0ce9869d4ec1395b7a7c8fae0c9.chunk.lzo"),
+        )?;
+        let mut fuse = FuseAccess::load(s.path(), "missingjMDZmMWQ5Y2JkMG")?;
+        assert_eq!(fuse.read_at(0, 1)?, &[1]);
+        match fuse.read_at(1 << CHUNKSZ_LOG, 1) {
+            Err(e @ Error::BackendLoad { .. }) => println!("expected Err: {}", e),
+            res @ _ => panic!("unexpected result: {:?}", res),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn broken_map() -> Result<()> {
+        let s = store(hashmap! {
+            rid("brokenhjMDZmMWQ5Y2JkMG") => vec![
+                Some((cid("6f9d15addefbbee6d9190df64706c58f"), vec![0u8; 1<<CHUNKSZ_LOG])),
+            ]
+        });
+        fs::OpenOptions::new()
+            .write(true)
+            .open(s.path().join("brokenhjMDZmMWQ5Y2JkMG"))?
+            .set_len(30)?;
+        // expected to succeed because map is not read at this step
+        let mut fuse = FuseAccess::new(s.path(), "brokenhjMDZmMWQ5Y2JkMG")?;
+        match fuse.load_if_empty() {
+            Err(e @ Error::ParseMap { .. }) => println!("expected Err: {}", e),
+            res @ _ => panic!("Unexpected result: {:?}", res),
+        }
+        Ok(())
+    }
 }
