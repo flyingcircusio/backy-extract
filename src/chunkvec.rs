@@ -81,8 +81,8 @@ pub struct ChunkVec {
 impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
     pub fn decode<'d>(input: &'d str) -> Result<Self> {
-        let rev: RevisionMap<'d> =
-            serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
+        let rev: RevisionMap<'d> = serde_json::from_str(input)
+            .map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
         if size % (1 << CHUNKSZ_LOG) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size));

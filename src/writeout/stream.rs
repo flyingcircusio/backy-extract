@@ -124,7 +124,8 @@ mod tests {
     const CS: usize = 1 << CHUNKSZ_LOG;
 
     lazy_static! {
-        static ref CHUNKS: Vec<Vec<u8>> = vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];
+        static ref CHUNKS: Vec<Vec<u8>> =
+            vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];
     }
 
     #[test]

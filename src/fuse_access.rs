@@ -12,6 +12,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -50,7 +51,7 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Page(Box<[u8]>);
 
 impl fmt::Debug for Page {
@@ -59,17 +60,20 @@ impl fmt::Debug for Page {
     }
 }
 
-#[derive(Debug, Clone)]
+impl Deref for Page {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct Cache {
     seq: usize,
     data: Page,
 }
 
 impl Cache {
-    fn new(seq: usize, data: Page) -> Self {
-        Self { seq, data }
-    }
-
     fn update(&mut self, seq: usize, data: Page) {
         self.seq = seq;
         self.data = data;
@@ -117,11 +121,12 @@ impl Rev {
     fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
         let map = dir.as_ref().join(id.as_ref());
         let rev = map.with_extension("rev");
-        let r: Self =
-            serde_yaml::from_reader(fs::File::open(&rev)?).map_err(|source| Error::ParseRev {
+        let r: Self = serde_yaml::from_reader(fs::File::open(&rev)?).map_err(|source| {
+            Error::ParseRev {
                 path: rev.to_path_buf(),
                 source,
-            })?;
+            }
+        })?;
         if r.backend_type != "chunked" {
             return Err(Error::WrongType {
                 betype: r.backend_type.to_owned(),
@@ -132,12 +137,6 @@ impl Rev {
     }
 }
 
-fn copy(target: &mut [u8], source: &[u8], offset: usize) -> usize {
-    let n = min(target.len(), source.len() - offset);
-    target[0..n].clone_from_slice(&source[offset..(offset + n)]);
-    n
-}
-
 #[derive(Debug, Clone)]
 pub struct FuseAccess {
     pub path: PathBuf,
@@ -145,7 +144,7 @@ pub struct FuseAccess {
     pub size: u64,
     map: Chunks,
     backend: Backend,
-    cache: Option<Cache>,
+    cache: Cache,
     cow: HashMap<usize, Page>,
 }
 
@@ -163,7 +162,7 @@ impl FuseAccess {
             size: 0,     // initialized by load()
             map: vec![], // initialized by load()
             backend,
-            cache: None,
+            cache: Default::default(),
             cow: HashMap::default(),
         })
     }
@@ -176,6 +175,16 @@ impl FuseAccess {
     }
 
     #[allow(unused)]
+    /// Returns the local path name of the map/revision file (relative to basedir)
+    pub fn name(&self) -> &OsStr {
+        OsStr::new(
+            self.path
+                .file_name()
+                .expect("Internal error: revision without path"),
+        )
+    }
+
+    #[allow(unused)]
     /// Loads chunk map from basedir
     ///
     /// Returns number of chunks found in the map. This function is idempotent: If the map is
@@ -183,7 +192,7 @@ impl FuseAccess {
     pub fn load_if_empty(&mut self) -> Result<()> {
         if self.map.is_empty() {
             let n = self.load_map()?;
-            debug!("Loaded {} chunks from chunk map {:?}", n, self.file_name());
+            debug!("Loaded {} chunks from chunk map {:?}", n, self.name());
         }
         Ok(())
     }
@@ -197,65 +206,62 @@ impl FuseAccess {
             })?;
         self.size = revmap.size;
         self.map = revmap.into_iter().map(|(_seq, id)| id).collect();
+        if let Some(initial_cache) = self.load_page(0) {
+            self.cache.update(0, initial_cache?);
+        }
         Ok(self.map.len())
     }
 
-    #[allow(unused)]
-    /// Returns the local path name of the map/revision file (relative to basedir)
-    pub fn file_name(&self) -> &OsStr {
-        OsStr::new(
-            self.path
-                .file_name()
-                .expect("Internal error: revision without path"),
-        )
+    fn load_page(&self, seq: usize) -> Option<Result<Page>> {
+        self.map[seq].as_ref().map(|chunk_id| {
+            let data =
+                self.backend
+                    .load(chunk_id.as_str())
+                    .map_err(|e| Error::BackendLoad {
+                        chunk_id: chunk_id.clone(),
+                        source: e,
+                    })?;
+            Ok(Page(data.into_boxed_slice()))
+        })
     }
 
     #[allow(unused)]
-    pub fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
+    pub fn read_at(&mut self, offset: u64, size: usize) -> Result<&[u8]> {
         if offset > self.size {
-            return Err(
-                io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond end of image").into(),
-            );
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "read beyond end of image",
+            )
+            .into());
         } else if offset == self.size {
-            return Ok(0);
+            return Ok(&[]);
         }
         let seq = pos2chunk(offset);
         let off = (offset & OFFSET_MASK) as usize;
+        let end = min(off + size, 1 << CHUNKSZ_LOG);
         if let Some(page) = self.cow.get(&seq) {
-            return Ok(copy(buf, &page.0, off));
+            return Ok(&page[off..end]);
         }
-        if let Some(cache) = &self.cache {
-            if seq == cache.seq {
-                return Ok(copy(buf, &cache.data.0, off));
+        if self.map[seq].is_some() {
+            if seq == self.cache.seq {
+                return Ok(&self.cache.data[off..end]);
             }
-        }
-        if let Some(chunk_id) = self.map[seq].clone() {
-            info!("{:?}: load seq {}", self.file_name(), seq);
-            let data = self
-                .backend
-                .load(chunk_id.as_str())
-                .map_err(|e| Error::BackendLoad {
-                    chunk_id,
-                    source: e,
-                })?;
-            let n = copy(buf, &data, off);
-            if let Some(cache) = &mut self.cache {
-                cache.update(seq, Page(data.into_boxed_slice()));
-            } else {
-                self.cache = Some(Cache::new(seq, Page(data.into_boxed_slice())));
-            }
-            Ok(n)
+            info!("{:?}: load seq {}", self.name(), seq);
+            self.cache.update(seq, self.load_page(seq).unwrap()?);
+            Ok(&self.cache.data[off..end])
         } else {
-            Ok(copy(buf, &ZERO_CHUNK, 0))
+            Ok(&ZERO_CHUNK[off..end])
         }
     }
 
     #[allow(unused)]
     pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
         if offset >= self.size {
-            return Err(
-                io::Error::new(io::ErrorKind::UnexpectedEof, "write beyond end of image").into(),
-            );
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "write beyond end of image",
+            )
+            .into());
         }
         let seq = pos2chunk(offset);
         let off = (offset & OFFSET_MASK) as usize;
@@ -266,16 +272,18 @@ impl FuseAccess {
                 .write_at(offset, &buf[..in_first_chunk])
                 .and_then(|written| {
                     Ok(written
-                        + self.write_at(offset + in_first_chunk as u64, &&buf[in_first_chunk..])?)
+                        + self.write_at(
+                            offset + in_first_chunk as u64,
+                            &&buf[in_first_chunk..],
+                        )?)
                 });
         }
         assert!(off + buf.len() <= 1 << CHUNKSZ_LOG);
         if let Some(page) = self.cow.get_mut(&seq) {
             page.0[off..off + buf.len()].clone_from_slice(buf);
         } else {
-            let mut p = vec![0u8; 1 << CHUNKSZ_LOG];
-            self.read_at(&mut p, offset)?;
-            info!("{:?}: clone into cow", self.file_name());
+            let mut p = Vec::from(self.read_at(offset & !OFFSET_MASK, 1 << CHUNKSZ_LOG)?);
+            info!("{:?}: clone into cow", self.name());
             p[off..off + buf.len()].clone_from_slice(buf);
             self.cow.insert(seq, Page(p.into_boxed_slice()));
         }
@@ -389,26 +397,30 @@ mod test {
         });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         let read_size = 1 << (CHUNKSZ_LOG - 3);
-        let mut buf = vec![0; read_size];
-        assert!(fuse.cache.is_none());
-        assert_eq!(fuse.read_at(&mut buf, 0)?, read_size);
-        assert_eq!(&buf, &vec![1u8; read_size]);
-        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
+        assert_eq!(
+            *fuse.read_at(2 << CHUNKSZ_LOG, read_size)?,
+            *vec![3u8; read_size]
+        );
+        assert_eq!(fuse.cache.seq, 2);
+        assert_eq!(*fuse.cache.data, *vec![3u8; 1 << CHUNKSZ_LOG]);
         // empty chunk -> zeroes
-        assert_eq!(fuse.read_at(&mut buf, 1 << CHUNKSZ_LOG)?, read_size);
-        assert_eq!(&buf, &vec![0; read_size]);
-        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
+        assert_eq!(
+            *fuse.read_at(1 << CHUNKSZ_LOG, read_size)?,
+            *vec![0; read_size]
+        );
+        assert_eq!(fuse.cache.seq, 2);
         // another chunk
-        assert_eq!(fuse.read_at(&mut buf, 2 << CHUNKSZ_LOG)?, read_size);
-        assert_eq!(&buf, &vec![3u8; read_size]);
-        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(2));
+        assert!(fuse.read_at(0, read_size).is_ok());
+        assert_eq!(fuse.cache.seq, 0);
         // read over the end -> short read
-        assert_eq!(fuse.read_at(&mut buf, (3 << CHUNKSZ_LOG) - 32)?, 32);
-        assert_eq!(&buf[0..32], &[3u8; 32]);
-        // read at end -> 0
-        assert_eq!(fuse.read_at(&mut buf, 3 << CHUNKSZ_LOG)?, 0);
+        assert_eq!(
+            fuse.read_at((3 << CHUNKSZ_LOG) - 32, read_size)?,
+            &[3u8; 32]
+        );
+        // read at end -> []
+        assert!(fuse.read_at(3 << CHUNKSZ_LOG, read_size)?.is_empty());
         // offset > len
-        assert!(fuse.read_at(&mut buf, (3 << CHUNKSZ_LOG) + 1).is_err());
+        assert!(fuse.read_at(3 << CHUNKSZ_LOG + 1, read_size).is_err());
         // nothing should have ended up in the COW map
         assert!(fuse.cow.is_empty());
         Ok(())
@@ -423,11 +435,14 @@ mod test {
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU400")?;
-        let mut buf = vec![0; 1 << CHUNKSZ_LOG];
-        assert_eq!(fuse.read_at(&mut buf, 0)?, 1 << CHUNKSZ_LOG);
-        assert_eq!(&buf, &vec![0; 1 << CHUNKSZ_LOG]);
-        assert_eq!(fuse.read_at(&mut buf, 1 << CHUNKSZ_LOG)?, 1 << CHUNKSZ_LOG);
-        assert_eq!(&buf, &vec![0; 1 << CHUNKSZ_LOG]);
+        assert_eq!(
+            *fuse.read_at(0, 1 << CHUNKSZ_LOG)?,
+            *vec![0; 1 << CHUNKSZ_LOG]
+        );
+        assert_eq!(
+            *fuse.read_at(1 << CHUNKSZ_LOG, 1 << CHUNKSZ_LOG)?,
+            *vec![0; 1 << CHUNKSZ_LOG]
+        );
         Ok(())
     }
 
@@ -442,52 +457,50 @@ mod test {
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "MmE1MThjMDZmMWQ5Y2JkMG")?;
-        let mut buf = [0u8; 8];
-        assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) + 4)?, 8);
-        assert_eq!(&buf, &[4, 5, 6, 7, 8, 9, 11, 11]);
+        assert_eq!(
+            fuse.read_at((1 << CHUNKSZ_LOG) + 4, 8)?,
+            &[4, 5, 6, 7, 8, 9, 11, 11]
+        );
         Ok(())
     }
 
     #[test]
     fn write_cow() -> Result<()> {
+        let mut data = vec![11u8; 1 << CHUNKSZ_LOG];
+        data[..10].clone_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let s = store(hashmap! {
             rid("XmE1MThjMDZmMWQ5Y2JkMG") => vec![
                 Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![10u8; 1<<CHUNKSZ_LOG])),
-                Some((cid("01fb50e6c86fae1679ef3351296fd671"), vec![11u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("01fb50e6c86fae1679ef3351296fd671"), data))
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
-        let mut buf = vec![0; 5];
         assert!(fuse.cow.is_empty());
         // write at beginning boundary
         assert_eq!(fuse.write_at(0, &[0, 1, 2, 3])?, 4);
-        assert_eq!(fuse.read_at(&mut buf, 0)?, 5);
-        assert_eq!(&buf, &[0, 1, 2, 3, 10]);
+        assert_eq!(fuse.read_at(0, 5)?, &[0, 1, 2, 3, 10]);
         // write at page boundary
         assert_eq!(fuse.write_at((1 << CHUNKSZ_LOG) - 4, &[0, 1, 2, 3])?, 4);
-        assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) - 5)?, 5);
-        assert_eq!(&buf, &[10, 0, 1, 2, 3]);
+        assert_eq!(fuse.read_at((1 << CHUNKSZ_LOG) - 5, 5)?, &[10, 0, 1, 2, 3]);
         // -> should not have loaded page 1 into the cache!
-        assert_eq!(fuse.cache.as_ref().map(|c| c.seq), Some(0));
+        assert_eq!(fuse.cache.seq, 0);
         // write over page boundary
-        assert_eq!(fuse.write_at((1 << CHUNKSZ_LOG) - 2, &[4, 5, 6, 7])?, 4);
-        assert_eq!(fuse.read_at(&mut buf, (1 << CHUNKSZ_LOG) - 4)?, 4);
+        assert_eq!(fuse.write_at((1 << CHUNKSZ_LOG) - 2, &[20, 21, 22, 23])?, 4);
         assert_eq!(
-            &buf[0..4],
+            fuse.read_at((1 << CHUNKSZ_LOG) - 4, 4)?,
             &[
                 0, 1, // from last write
-                4, 5, // newly written to page 0
+                20, 21 // newly written to page 0
             ]
         );
-        assert_eq!(fuse.read_at(&mut buf, 1 << CHUNKSZ_LOG)?, 5);
         assert_eq!(
-            &buf,
+            fuse.read_at(1 << CHUNKSZ_LOG, 5)?,
             &[
-                6, 7, // newly written to page 1
-                11, 11, 11
+                22, 23, // newly written to page 1
+                2, 3, 4 // original contents of page 1
             ]
-        ); // original contents of page 1
-           // write over EOF
+        );
+        // write over EOF XXX
         assert!(fuse
             .write_at((2 << CHUNKSZ_LOG) - 2, &[4, 5, 6, 7])
             .is_err());
@@ -499,9 +512,7 @@ mod test {
         let s = store(hashmap! {rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None]});
         let mut fuse = FuseAccess::load(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
         assert_eq!(fuse.write_at(2, &[1])?, 1);
-        let mut buf = vec![0; 5];
-        assert_eq!(fuse.read_at(&mut buf, 0)?, 5);
-        assert_eq!(&buf, &[0, 0, 1, 0, 0]);
+        assert_eq!(fuse.read_at(0, 5)?, &[0, 0, 1, 0, 0]);
         Ok(())
     }
 

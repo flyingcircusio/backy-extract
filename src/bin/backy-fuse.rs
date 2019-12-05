@@ -4,8 +4,8 @@ extern crate log;
 use anyhow::{Context, Result};
 use backy_extract::{purgelock, FuseAccess, FuseDirectory};
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request, FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use std::collections::HashMap;
@@ -59,7 +59,6 @@ fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
 struct BackyFS {
     dir: FuseDirectory,
     reverse: HashMap<OsString, u64>,
-    buf: Vec<u8>,
 }
 
 impl BackyFS {
@@ -67,12 +66,21 @@ impl BackyFS {
         let dir = FuseDirectory::init(dir)?;
         let mut reverse = HashMap::new();
         for (ino, entry) in dir.iter() {
-            reverse.insert(entry.file_name().to_owned(), *ino);
+            reverse.insert(entry.name().to_owned(), *ino);
         }
-        let buf = Vec::with_capacity(1 << 15);
-        Ok(Self { dir, reverse, buf })
+        Ok(Self { dir, reverse })
     }
 }
+
+macro_rules! reject_node1(
+    ($op:expr, $ino:expr, $reply:expr) => {
+        if $ino == FUSE_ROOT_ID {
+            error!("{}: trying to access directory as regular file", $op);
+            $reply.error(EINVAL);
+            return;
+        }
+    }
+);
 
 impl Filesystem for BackyFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, re: ReplyEntry) {
@@ -120,40 +128,27 @@ impl Filesystem for BackyFS {
         }
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut re: ReplyDirectory) {
+    fn readdir(&mut self, _r: &Request, ino: u64, _fh: u64, off: i64, mut re: ReplyDirectory) {
         if ino != FUSE_ROOT_ID {
             error!("readdir() failed - inode {} is not a directory", ino);
             re.error(ENOTDIR);
             return;
         }
-        if offset == 0 {
+        if off == 0 {
             re.add(FUSE_ROOT_ID, 1, FileType::Directory, ".");
             re.add(FUSE_ROOT_ID, 2, FileType::Directory, "..");
         }
-        if offset < (self.dir.len() as i64) + 2 {
-            for (n, (ino, entry)) in self
-                .dir
-                .iter()
-                .enumerate()
-                .skip((offset - 2).max(0) as usize)
+        if off < (self.dir.len() as i64) + 2 {
+            for (n, (ino, entry)) in self.dir.iter().enumerate().skip((off - 2).max(0) as usize)
             {
-                re.add(
-                    *ino,
-                    (n + 3) as i64,
-                    FileType::RegularFile,
-                    entry.file_name(),
-                );
+                re.add(*ino, (n + 3) as i64, FileType::RegularFile, entry.name());
             }
         }
         re.ok()
     }
 
     fn open(&mut self, _req: &Request, ino: u64, _flags: u32, re: ReplyOpen) {
-        if ino == FUSE_ROOT_ID {
-            error!("read(): trying to access directory as regular file");
-            re.error(EINVAL);
-            return;
-        }
+        reject_node1!("open", ino, re);
         if let Some(entry) = self.dir.get_mut(ino) {
             match entry.load_if_empty() {
                 Ok(_) => re.opened(0, 0),
@@ -168,21 +163,14 @@ impl Filesystem for BackyFS {
         }
     }
 
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, re: ReplyData) {
-        if ino == FUSE_ROOT_ID {
-            error!("read(): trying to access directory as regular file");
-            re.error(EINVAL);
-            return;
-        }
+    fn read(&mut self, _r: &Request, ino: u64, _fh: u64, off: i64, size: u32, re: ReplyData) {
+        reject_node1!("read", ino, re);
         if let Some(entry) = self.dir.get_mut(ino) {
             let size = size as usize;
-            if self.buf.len() < size {
-                self.buf.resize(size, 0);
-            }
-            match entry.read_at(&mut self.buf[..size], offset.try_into().unwrap()) {
-                Ok(n) => re.data(&self.buf[..n]),
+            match entry.read_at(off.try_into().unwrap(), size as usize) {
+                Ok(data) => re.data(&data),
                 Err(e) => {
-                    error!("read(0x{:x} @ {}): {}", ino, offset, e);
+                    error!("read(0x{:x} @ {}): {}", ino, off, e);
                     re.error(EIO)
                 }
             }
@@ -194,34 +182,30 @@ impl Filesystem for BackyFS {
 
     fn write(
         &mut self,
-        _req: &Request,
+        _r: &Request,
         ino: u64,
         _fh: u64,
-        offset: i64,
+        off: i64,
         data: &[u8],
         _flags: u32,
         re: ReplyWrite,
     ) {
-        if ino == FUSE_ROOT_ID {
-            error!("write(): trying to write to the directory");
-            re.error(EINVAL);
-            return;
-        }
+        reject_node1!("write", ino, re);
         if let Some(entry) = self.dir.get_mut(ino) {
-            match entry.write_at(offset.try_into().unwrap(), &data) {
+            match entry.write_at(off.try_into().unwrap(), &data) {
                 Ok(n) if n == data.len() => re.written(n.try_into().expect("overflow")),
                 Ok(n) => {
                     error!(
                         "write(0x{:x} @ {}): short write ({} of {})",
                         ino,
-                        offset,
+                        off,
                         n,
                         data.len()
                     );
                     re.error(EIO)
                 }
                 Err(e) => {
-                    error!("write(0x{:x} @ {}): {}", ino, offset, e);
+                    error!("write(0x{:x} @ {}): {}", ino, off, e);
                     re.error(EIO)
                 }
             }

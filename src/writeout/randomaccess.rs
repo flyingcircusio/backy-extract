@@ -8,9 +8,9 @@ use rand::prelude::*;
 use rand::rngs::ThreadRng;
 use std::fmt;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::io;
 use std::io::prelude::*;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 /// File/block device restore target.
