@@ -66,7 +66,7 @@ impl BackyFS {
         let dir = FuseDirectory::init(dir)?;
         let mut reverse = HashMap::new();
         for (ino, entry) in dir.iter() {
-            reverse.insert(entry.name().to_owned(), *ino);
+            reverse.insert(entry.name.to_owned(), *ino);
         }
         Ok(Self { dir, reverse })
     }
@@ -141,7 +141,7 @@ impl Filesystem for BackyFS {
         if off < (self.dir.len() as i64) + 2 {
             for (n, (ino, entry)) in self.dir.iter().enumerate().skip((off - 2).max(0) as usize)
             {
-                re.add(*ino, (n + 3) as i64, FileType::RegularFile, entry.name());
+                re.add(*ino, (n + 3) as i64, FileType::RegularFile, &entry.name);
             }
         }
         re.ok()

@@ -1,8 +1,8 @@
 //! High-performance, multi-threaded backy image restore library.
 //!
 //! `backy_extract` reads an backup revision from a
-//! [backy](https://bitbucket.org/flyingcircus/backy) *chunked v2* data store, decompresses it on
-//! the fly and writes it to a restore target using pluggable writeout modules.
+//! [backy](https://bitbucket.org/flyingcircus/backy) *chunked v2* data store, decompresses it
+//! on the fly and writes it to a restore target using pluggable writeout modules.
 
 mod backend;
 mod chunkvec;
@@ -73,8 +73,8 @@ lazy_static! {
 
 /// Transport of a single image data chunk.
 ///
-/// A chunk needs to be placed into all logical positions that are listed in the `seqs` attribute.
-/// Each seq starts at offset (seq << CHUNKSZ_LOG) bytes in the restored image.
+/// A chunk needs to be placed into all logical positions that are listed in the `seqs`
+/// attribute. Each seq starts at offset (seq << CHUNKSZ_LOG) bytes in the restored image.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Chunk {
     pub data: Data,
