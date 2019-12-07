@@ -1,0 +1,4 @@
+2019-12-07  Christian Kauhaus <kc@flyingcircus.io>
+
+	* FUSE driver `backy-fuse`
+	* Don't leave stray .purge files (#1)

@@ -5,9 +5,9 @@ DESTDIR := dist
 
 all: release
 
-release: target/release/backy-extract
+release: target/release/backy-extract target/release/backy-fuse
 
-target/release/backy-extract: Cargo.toml src/*.rs src/*/*.rs
+target/release/backy-%: Cargo.toml src/*.rs src/*/*.rs
 	cargo build --release --features fuse_driver
 	strip $@
 
