@@ -1,6 +1,6 @@
 [package]
 name = "backy-extract"
-version = "0.3.0-dev"
+version = "0.3.0"
 authors = ["Christian Kauhaus <kc@flyingcircus.io>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
