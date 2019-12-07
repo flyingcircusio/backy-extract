@@ -62,10 +62,10 @@ impl Page {
     /// Fetches a chunk from the backend
     ///
     /// Panics if the requested page is a zero page and thus not present in the backend.
-    fn load(map: &Chunks, backend: &Backend, seq: usize) -> Result<Self> {
+    fn load(map: &[Option<ChunkID>], backend: &Backend, seq: usize) -> Result<Self> {
         let cid = map[seq]
             .clone()
-            .expect(&format!("failed to locate chunk {} in map", seq));
+            .unwrap_or_else(|| panic!("failed to locate chunk {} in map", seq));
         Ok(backend
             .load(cid.as_str())
             .map_err(|e| Error::BackendLoad {
@@ -201,6 +201,12 @@ pub struct FuseAccess {
 
 const OFFSET_MASK: u64 = (1 << CHUNKSZ_LOG) - 1;
 
+/// API to read/write images from the upper-level FUSE driver
+///
+/// This layer implements simple CoW caching. Pages are put into the cache
+/// either when they are written to or when they are read for the second time.
+/// Modifications are only stored in memory and never written to disk. This
+/// enables filesystem tools like fsck to perform recovery.
 impl FuseAccess {
     fn new<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
         let dir = dir.as_ref();

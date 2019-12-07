@@ -27,6 +27,7 @@ pub fn store_tar() -> TempDir {
     Archive::new(File::open(FIXTURES.join("store.tar")).unwrap())
         .unpack(&tmp)
         .expect("unpack store.tar");
+    File::create(tmp.path().join(".purge")).unwrap();
     tmp
 }
 

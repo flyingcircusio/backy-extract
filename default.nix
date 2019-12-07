@@ -1,19 +1,47 @@
 { system ? builtins.system
+, pkgs ? import <nixpkgs> {}
+, stdenv ? pkgs.stdenv
 , lib ? pkgs.lib
 , lzo ? pkgs.lzo
-, pkgs ? import <nixpkgs> {}
+, fuse ? pkgs.fuse
+, pkgconfig ? pkgs.pkgconfig
+, docutils ? pkgs.docutils
+, jq ? pkgs.jq
 , rustPlatform ? pkgs.rustPlatform
 , Security ? pkgs.darwin.apple_sdk.frameworks.Security
-, stdenv ? pkgs.stdenv
 }:
 
+let
+  excludeTarget =
+    name: type: let baseName = baseNameOf (toString name); in ! (
+      baseName == "target" && type == "directory");
+
+in
 rustPlatform.buildRustPackage rec {
   name = "backy-extract";
   version = "0.3.0";
 
-  src = lib.cleanSource ./.;
-  buildInputs = [ lzo ] ++ lib.optionals stdenv.isDarwin [ Security ];
-  cargoSha256 = "10lzz328mzq33gpsxmxy6q9xkyhxpfn6dnj5zc9x4kmaimzpbipw";
+  src = lib.cleanSourceWith {
+    filter = n: t: (excludeTarget n t) && (lib.cleanSourceFilter n t);
+    src = ./.;
+  };
+
+  nativeBuildInputs = [ docutils jq ];
+
+  buildInputs =
+    [ lzo ] ++
+    (lib.optionals stdenv.isDarwin [ Security ]) ++
+    (lib.optionals stdenv.isLinux [ pkgconfig fuse ]);
+
+  preConfigure = ''
+    if ! cargo read-manifest | jq .version -r | grep -q $version; then
+      echo "*** version mismatch, expected $version in Cargo.toml" >&2
+      false
+    fi
+  '';
+
+  cargoSha256 = "1nsdj0sxprf3lml9sfa2l6i5824d6r4m3nb4sidj615ycd3bb2xq";
+  cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
 
   meta = with lib; {
     description = "Rapid restore tool for backy";
@@ -21,4 +49,18 @@ rustPlatform.buildRustPackage rec {
     maintainers = [ maintainers.ckauhaus ];
     platforms = platforms.unix;
   };
+
+  postPatch = ''
+    substituteAllInPlace man/*.rst
+  '';
+
+  postBuild = ''
+    mkdir -p $out/share/doc
+    cp README.md $out/share/doc
+
+    mkdir -p $out/share/man/man1
+    for f in $man/*.1.rst; do
+      rst2man $f > $out/share/man/man1/''${f%%.rst}
+    done
+  '';
 }

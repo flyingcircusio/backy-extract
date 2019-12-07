@@ -243,6 +243,10 @@ fn main() -> Result<()> {
     let lock = purgelock(&app.basedir).context("Failed to acquire .purge lock")?;
     info!("Loading revisions");
     let fs = BackyFS::init(&app.basedir)?;
+    println!(
+        "Mounting FUSE fileystem...\nUnmount with: fusermount -u '{}'",
+        app.mountpoint.display()
+    );
     fuse::mount(
         fs,
         &app.mountpoint,

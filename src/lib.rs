@@ -28,8 +28,7 @@ use memmap::MmapMut;
 use num_cpus;
 use smallstr::SmallString;
 use smallvec::SmallVec;
-use std::fmt::Debug;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -103,7 +102,7 @@ type RevID = SmallString<[u8; 24]>;
 
 /// Aqcuire 'purge' lock which prevents backy from deleting chunks
 pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
-    let f = File::create(basedir.join(".purge"))?;
+    let f = OpenOptions::new().write(true).create(false).open(basedir.join(".purge"))?;
     f.try_lock_exclusive()?;
     Ok(f)
 }
