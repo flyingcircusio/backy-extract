@@ -102,7 +102,10 @@ type RevID = SmallString<[u8; 24]>;
 
 /// Aqcuire 'purge' lock which prevents backy from deleting chunks
 pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
-    let f = OpenOptions::new().write(true).create(false).open(basedir.join(".purge"))?;
+    let f = OpenOptions::new()
+        .write(true)
+        .create(false)
+        .open(basedir.join(".purge"))?;
     f.try_lock_exclusive()?;
     Ok(f)
 }

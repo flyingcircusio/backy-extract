@@ -104,19 +104,22 @@ Don't forget to unmount the FUSE filesystem when finished:
 
 Mount backup images::
 
-    $ backy-fuse -d /srv/backy/testvm /mnt/backy
+    $ backy-fuse -d /srv/backy/testvm /mnt/backy-fuse
 
 Select revision to restore from. In this example, we will be restoring from revision
 `tAGKE5rrxReggVMtoPSr7`.
 
 Set up loop device to access partitions inside the image::
 
-    # losetup -f -P --show /mnt/backy/tAGKE5rrxReggVMtoPSr7
-    /dev/loop1
+    # losetup -f -P --show /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7
+    /dev/loop0
 
-Loop mount the first partition found in the image::
+Loop mount the image::
 
-    # mount -oloop /dev/loop1p1 /mnt/restore
+    # mount -oloop /dev/loop0p1 /mnt/restore
+
+If the image does not contain a partition table, use `/dev/loop0` instead of
+`/dev/loop0p1` for example.
 
 After finishing restore operations, unmount the loop mount first::
 
@@ -124,14 +127,16 @@ After finishing restore operations, unmount the loop mount first::
 
 Then unregister the loop device::
 
-    # losetup -d /dev/loop1
+    # losetup -d /dev/loop0
 
 Finally, unmount the FUSE filesystem::
 
-    $ fusermount -u /mnt/backy
+    $ fusermount -u /mnt/backy-fuse
 
 
 SEE ALSO
 ========
 
 fuse(8), mount(8), fusermount(1)
+
+https://bitbucket.org/flyingcircus/backy

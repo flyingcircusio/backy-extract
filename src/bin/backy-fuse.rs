@@ -244,7 +244,7 @@ fn main() -> Result<()> {
     info!("Loading revisions");
     let fs = BackyFS::init(&app.basedir)?;
     println!(
-        "Mounting FUSE fileystem...\nUnmount with: fusermount -u '{}'",
+        "Mounting FUSE fileystem... unmount with: fusermount -u '{}'",
         app.mountpoint.display()
     );
     fuse::mount(
