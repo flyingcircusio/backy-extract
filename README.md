@@ -84,5 +84,5 @@ https://github.com/flyingcircusio/backy-extract/.
 Author
 ======
 
-Contact [Christian Kauhaus](kc@flyingcircus.io) for questions, suggestions, and
+Contact [Christian Kauhaus](mailto:kc@flyingcircus.io) for questions, suggestions, and
 bug fixes.
