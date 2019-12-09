@@ -94,7 +94,7 @@ Then explore or copy images from a second terminal::
 
     $ ls -l /mnt/backy
 
-Don't forget to unmount the FUSE filesystem when finished:
+Don't forget to unmount the FUSE filesystem when finished::
 
     $ fusermount u /mnt/backy
 

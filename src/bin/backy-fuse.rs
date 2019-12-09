@@ -225,14 +225,20 @@ struct App {
     /// Backy base directory
     ///
     /// Example: /srv/backy/vm0
-    #[structopt(short = "d", long, default_value = ".")]
+    #[structopt(short = "d", long, value_name = "DIRECTORY", default_value = ".")]
     basedir: PathBuf,
     /// FUSE mount options
     ///
     /// See fuse(8) for possible values. Accepts multiple comma-separated
     /// values.
-    #[structopt(short = "o", long, default_value = "allow_root")]
+    #[structopt(
+        short = "o",
+        long,
+        value_name = "OPTIONS",
+        default_value = "allow_root"
+    )]
     mountopts: Vec<String>,
+    #[structopt(name = "MOUNTPOINT")]
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
     mountpoint: PathBuf,
 }
