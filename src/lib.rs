@@ -106,7 +106,7 @@ pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
         .write(true)
         .create(false)
         .open(basedir.join(".purge"))?;
-    f.try_lock_exclusive()?;
+    f.try_lock_shared()?;
     Ok(f)
 }
 
