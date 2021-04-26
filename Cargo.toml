@@ -1,7 +1,7 @@
 [package]
 name = "backy-extract"
 version = "0.3.2-dev"
-authors = ["Christian Kauhaus <kc@flyingcircus.io>"]
+authors = ["Christian Kauhaus <christian@kauhaus.de>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
 license = "BSD-3-Clause"
@@ -13,7 +13,7 @@ atty = "0.2"
 byteorder = "1.2"
 chrono = "0.4"
 clap = { version = "2.32", features = ["wrap_help"] }
-console = "0.7"
+console = "0.14"
 crossbeam = "0.7"
 env_logger = "0.7"
 fnv = "1"
@@ -53,3 +53,4 @@ maplit = "1"
 
 [profile.release]
 panic = "abort"
+lto = "thin"
