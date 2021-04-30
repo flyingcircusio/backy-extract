@@ -2,38 +2,34 @@ mod common;
 
 use anyhow::{ensure, Result};
 use backy_extract::*;
-use common::*;
+use common::{store_tar, store_with_rev, IMAGE};
 use std::fs::{read, remove_file};
 
 #[test]
 fn restore_to_stream() -> Result<()> {
     let store = store_tar();
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
-    let expected = image();
-    for t in &[1, 2] {
-        let mut buf = Vec::with_capacity(4 << CHUNKSZ_LOG);
-        e.threads(*t).extract(Stream::new(&mut buf))?;
-        assert_eq!(buf.len(), expected.len(), "length mismatch for t={}", t);
-        ensure!(buf == expected, "restored image contents mismatch");
-    }
+    let mut buf = Vec::with_capacity(4 << CHUNKSZ_LOG);
+    e.threads(2).extract(Stream::new(&mut buf))?;
+    assert_eq!(buf.len(), IMAGE.len(), "image length mismatch");
+    ensure!(buf == *IMAGE, "restored image contents mismatch");
     Ok(())
 }
 
 #[test]
 fn restore_to_file() -> Result<()> {
     let store = store_tar();
-    let tgt = store.path().join("target_image");
     let mut e = Extractor::init(store.path().join("VNzWKjnMqd6w58nzJwUZ98"))?;
-    let expected = image();
     for &sparse in &[true, false] {
-        remove_file(&tgt).ok();
+        let tgt = store.path().join(format!("target_image_sparse={}", sparse));
         e.threads(3)
             .extract(RandomAccess::new(&tgt, Some(sparse)))?;
         ensure!(
-            read(&tgt)? == expected,
+            read(&tgt)? == *IMAGE,
             "restored image contents mismatch (sparse={})",
             sparse
         );
+        remove_file(&tgt).ok();
     }
     Ok(())
 }
@@ -46,7 +42,7 @@ fn restore_rev_with_holes() -> Result<()> {
     let mut e = Extractor::init(rev)?;
     let mut buf = Vec::new();
     e.threads(4).extract(Stream::new(&mut buf))?;
-    ensure!(buf == image(), "restored image contents mismatch");
+    ensure!(buf == *IMAGE, "restored image contents mismatch");
     Ok(())
 }
 

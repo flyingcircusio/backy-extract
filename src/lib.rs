@@ -7,15 +7,13 @@
 mod backend;
 mod chunkvec;
 #[cfg(feature = "fuse_driver")]
-mod fuse_access;
+pub mod fuse;
 #[cfg(test)]
 mod test_helper;
 mod writeout;
 
 use self::backend::Backend;
 use self::chunkvec::ChunkVec;
-#[cfg(feature = "fuse_driver")]
-pub use self::fuse_access::{FuseAccess, FuseDirectory};
 pub use self::writeout::{RandomAccess, Stream};
 use self::writeout::{WriteOut, WriteOutBuilder};
 

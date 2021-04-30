@@ -46,10 +46,11 @@ path = "src/bin/backy-fuse.rs"
 required-features = [ "fuse_driver" ]
 
 [dev-dependencies]
+bytes = "1"
 flate2 = "1.0"
+maplit = "1"
 tar = "0.4"
 tempdir = "0.3"
-maplit = "1"
 
 [profile.release]
 panic = "abort"

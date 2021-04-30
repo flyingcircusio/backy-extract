@@ -261,10 +261,10 @@ impl FuseAccess {
         Ok(self.map.len())
     }
 
-    #[allow(unused)]
+    /// Seeks to offset and reads the specified amount of bytes. Note that this function may
+    /// return less than `size` bytes.
     pub fn read_at(&mut self, offset: u64, size: usize) -> Result<&[u8]> {
         match offset {
-            // XXX std::cmp::Ordering
             o if o == self.size => Ok(&[]),
             o if o > self.size => {
                 Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond end of image").into())
@@ -276,6 +276,11 @@ impl FuseAccess {
         }
     }
 
+    /// Returns data from chunk `seq`. Data is fetched from the cache or loaded from disk if
+    /// necessary. The cache is filled only on the second read access to a specific page. This
+    /// keeps the cache clean of purly sequential reads.
+    ///
+    /// Note that this function may return less that the requested amount of data.
     fn read(&mut self, seq: usize, off: usize, end: usize) -> Result<&[u8]> {
         match self.cow.entry(seq) {
             Entry::Vacant(e) => {
@@ -291,7 +296,7 @@ impl FuseAccess {
             if self.current.matches(seq) {
                 return Ok(&self.current[off..end]);
             }
-            info!("{:?}: load #{} (ro)", self.name, seq);
+            info!("{:?}: load #{}+0x{:0x} (read)", self.name, seq, off);
             self.current
                 .update(seq, Page::load(&self.map, &self.backend, seq)?);
             self.seen_before.insert(seq);
@@ -301,7 +306,9 @@ impl FuseAccess {
         }
     }
 
-    #[allow(unused)]
+    /// Saved dirty data to the CoW cache in memory. Data is never written to disk. Note that not
+    /// all bytes may be written. In this case, the returned number is less than buf.len() and the
+    /// write operation should be retried with the remainder.
     pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
         if offset >= self.size {
             return Err(
@@ -309,7 +316,7 @@ impl FuseAccess {
             );
         }
         let seq = pos2chunk(offset);
-        let off = (offset & OFFSET_MASK);
+        let off = offset & OFFSET_MASK;
         // split large writes that go over a page boundary
         if pos2chunk(offset + buf.len() as u64 - 1) != seq {
             let in_first_chunk = chunk2pos(1) - off;
@@ -346,7 +353,6 @@ pub struct FuseDirectory {
 }
 
 impl FuseDirectory {
-    #[allow(unused)]
     pub fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
         let dir = dir.as_ref();
         let mut d = Self {
@@ -373,30 +379,19 @@ impl FuseDirectory {
             Err(Error::NoRevisions(PathBuf::from(dir)))
         }
     }
+}
 
-    #[allow(unused)]
-    pub fn iter(&self) -> impl Iterator<Item = (&u64, &FuseAccess)> {
-        self.revs.iter()
+impl Deref for FuseDirectory {
+    type Target = HashMap<u64, FuseAccess>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.revs
     }
+}
 
-    #[allow(unused)]
-    pub fn get(&self, ino: u64) -> Option<&FuseAccess> {
-        self.revs.get(&ino)
-    }
-
-    #[allow(unused)]
-    pub fn get_mut(&mut self, ino: u64) -> Option<&mut FuseAccess> {
-        self.revs.get_mut(&ino)
-    }
-
-    #[allow(unused)]
-    pub fn len(&self) -> usize {
-        self.revs.len()
-    }
-
-    #[allow(unused)]
-    pub fn is_empty(&self) -> bool {
-        self.revs.is_empty()
+impl DerefMut for FuseDirectory {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.revs
     }
 }
 
