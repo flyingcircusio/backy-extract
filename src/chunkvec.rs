@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::IntoIterator;
 
-pub type ChunkID = SmallString<[u8; 32]>;
+pub type ChunkId = SmallString<[u8; 32]>;
 
 // Format of the revision file as deserialized from JSON
 #[derive(Debug, Deserialize)]
@@ -19,7 +19,7 @@ pub struct RevisionMap<'d> {
 }
 
 impl<'d> IntoIterator for RevisionMap<'d> {
-    type Item = (usize, Option<ChunkID>);
+    type Item = (usize, Option<ChunkId>);
     type IntoIter = RevisionMapIterator<'d>;
 
     fn into_iter(self) -> RevisionMapIterator<'d> {
@@ -49,13 +49,13 @@ impl<'d> RevisionMapIterator<'d> {
 }
 
 impl<'d> Iterator for RevisionMapIterator<'d> {
-    type Item = (usize, Option<ChunkID>);
+    type Item = (usize, Option<ChunkId>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.i;
         self.i += 1;
         if i < self.max {
-            let id: Option<ChunkID> = self.map.remove(&i).map(From::from);
+            let id: Option<ChunkId> = self.map.remove(&i).map(From::from);
             Some((i, id))
         } else {
             None
@@ -65,7 +65,7 @@ impl<'d> Iterator for RevisionMapIterator<'d> {
 
 /// Mapping chunk_id (relpath) to list of seq_ids which reference it.
 /// This can be thought of a reverse mapping of what is in the revfile.
-type ChunkMap = BTreeMap<ChunkID, SmallVec<[usize; 4]>>;
+type ChunkMap = BTreeMap<ChunkId, SmallVec<[usize; 4]>>;
 
 /// All chunks of a revision, grouped by chunk ID.
 #[derive(Debug, Clone)]
@@ -81,8 +81,8 @@ pub struct ChunkVec {
 impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
     pub fn decode<'d>(input: &'d str) -> Result<Self> {
-        let rev: RevisionMap<'d> = serde_json::from_str(input)
-            .map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
+        let rev: RevisionMap<'d> =
+            serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
         if size % (1 << CHUNKSZ_LOG) != 0 {
             return Err(ExtractError::UnalignedSize(rev.size));
@@ -118,7 +118,7 @@ impl ChunkVec {
         tx: Sender<Chunk>,
     ) -> Result<()> {
         assert!(nthreads > 0 && threadid < nthreads);
-        let mut ids: Vec<(&ChunkID, &SmallVec<[usize; 4]>)> = self
+        let mut ids: Vec<(&ChunkId, &SmallVec<[usize; 4]>)> = self
             .chunks
             .iter()
             .skip(threadid as usize)

@@ -1,13 +1,14 @@
 //! Fuse-driven access to revisions with in-memory COW
 
 use crate::backend::{self, Backend};
-use crate::chunkvec::{ChunkID, RevisionMap};
-use crate::{chunk2pos, pos2chunk, RevID, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::chunkvec::{ChunkId, RevisionMap};
+use crate::{chunk2pos, pos2chunk, CHUNKSZ_LOG, ZERO_CHUNK};
 use chrono::{DateTime, TimeZone, Utc};
 use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
 use log::{debug, info};
 use serde::{Deserialize, Deserializer};
+use smallstr::SmallString;
 use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::ffi::OsString;
@@ -39,7 +40,7 @@ pub enum Error {
     Backend(#[from] backend::Error),
     #[error("Failed to load data chunk {chunk_id:?}")]
     BackendLoad {
-        chunk_id: ChunkID,
+        chunk_id: ChunkId,
         source: backend::Error,
     },
     #[error("Unknown backend_type '{}' found in {}", betype, path.display())]
@@ -53,7 +54,7 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-type Chunks = Vec<Option<ChunkID>>;
+type Chunks = Vec<Option<ChunkId>>;
 
 #[derive(Clone, Default)]
 struct Page(Box<[u8]>);
@@ -62,7 +63,7 @@ impl Page {
     /// Fetches a chunk from the backend
     ///
     /// Panics if the requested page is a zero page and thus not present in the backend.
-    fn load(map: &[Option<ChunkID>], backend: &Backend, seq: usize) -> Result<Self> {
+    fn load(map: &[Option<ChunkId>], backend: &Backend, seq: usize) -> Result<Self> {
         let cid = map[seq]
             .clone()
             .unwrap_or_else(|| panic!("failed to locate chunk {} in map", seq));
@@ -106,6 +107,8 @@ impl fmt::Debug for Page {
     }
 }
 
+type RevID = SmallString<[u8; 24]>;
+
 fn revid_de<'de, D>(deserializer: D) -> Result<RevID, D::Error>
 where
     D: Deserializer<'de>,
@@ -145,12 +148,11 @@ impl Rev {
     fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
         let map = dir.as_ref().join(id.as_ref());
         let rev = map.with_extension("rev");
-        let r: Self = serde_yaml::from_reader(fs::File::open(&rev)?).map_err(|source| {
-            Error::ParseRev {
+        let r: Self =
+            serde_yaml::from_reader(fs::File::open(&rev)?).map_err(|source| Error::ParseRev {
                 path: rev.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
         if r.backend_type != "chunked" {
             return Err(Error::WrongType {
                 betype: r.backend_type.to_owned(),
@@ -264,11 +266,9 @@ impl FuseAccess {
         match offset {
             // XXX std::cmp::Ordering
             o if o == self.size => Ok(&[]),
-            o if o > self.size => Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "read beyond end of image",
-            )
-            .into()),
+            o if o > self.size => {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond end of image").into())
+            }
             _ => {
                 let off = (offset & OFFSET_MASK) as usize;
                 self.read(pos2chunk(offset), off, min(off + size, 1 << CHUNKSZ_LOG))
@@ -304,11 +304,9 @@ impl FuseAccess {
     #[allow(unused)]
     pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
         if offset >= self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "write beyond end of image",
-            )
-            .into());
+            return Err(
+                io::Error::new(io::ErrorKind::UnexpectedEof, "write beyond end of image").into(),
+            );
         }
         let seq = pos2chunk(offset);
         let off = (offset & OFFSET_MASK);
@@ -319,10 +317,8 @@ impl FuseAccess {
                 .write_at(offset, &buf[..in_first_chunk as usize])
                 .and_then(|written| {
                     Ok(written
-                        + self.write_at(
-                            offset + in_first_chunk,
-                            &&buf[in_first_chunk as usize..],
-                        )?)
+                        + self
+                            .write_at(offset + in_first_chunk, &&buf[in_first_chunk as usize..])?)
                 });
         }
         assert!(off + buf.len() as u64 <= 1 << CHUNKSZ_LOG);
@@ -407,8 +403,80 @@ impl FuseDirectory {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test::{cid, rid, store};
+    use crate::chunkvec::ChunkId;
+    use backend::MAGIC;
     use maplit::hashmap;
+    use serde::Serialize;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io::Write;
+    use tempdir::TempDir;
+
+    // Identical to the one in chunkvec.rs, but without borrows
+    #[derive(Debug, Default, Serialize)]
+    struct RevisionMap {
+        mapping: HashMap<String, String>,
+        size: u64,
+    }
+
+    pub fn cid(id: &str) -> ChunkId {
+        ChunkId::from_str(id)
+    }
+
+    pub fn rid(id: &str) -> RevID {
+        RevID::from_str(id)
+    }
+
+    pub fn store(spec: HashMap<RevID, Vec<Option<(ChunkId, Vec<u8>)>>>) -> TempDir {
+        let td = TempDir::new("backy-store-test").expect("tempdir");
+        let p = td.path();
+        for (rev, chunks) in spec {
+            fs::write(
+                p.join(&rev.as_str()).with_extension("rev"),
+                format!(
+                    r#"backend_type: chunked
+parent: JZ3zfSHq24Fy5ENgTgYLGF
+stats:
+    bytes_written: {written}
+    ceph-verification: partial
+    chunk_stats: {{write_full: {nchunks}, write_partial: 0}}
+    duration: 216.60814833641052
+tags: [daily]
+timestamp: 2019-11-14 14:21:18.289+00:00
+trust: trusted
+uuid: {rev}
+"#,
+                    written = chunk2pos(chunks.len()),
+                    nchunks = chunks.len(),
+                    rev = rev.as_str()
+                ),
+            )
+            .expect("write .rev");
+            let mut map = RevisionMap {
+                size: (chunks.len() << CHUNKSZ_LOG) as u64,
+                mapping: Default::default(),
+            };
+            fs::create_dir(p.join("chunks")).ok();
+            fs::write(p.join("chunks/store"), "v2").unwrap();
+            for (i, chunk) in chunks.iter().enumerate() {
+                if let Some(c) = chunk {
+                    let id = c.0.to_string();
+                    let file = p
+                        .join("chunks")
+                        .join(&id[0..2])
+                        .join(format!("{}.chunk.lzo", id));
+                    fs::create_dir_all(file.parent().unwrap()).ok();
+                    let mut f = fs::File::create(file).unwrap();
+                    f.write(&MAGIC).unwrap();
+                    f.write(&minilzo::compress(&c.1).unwrap()).unwrap();
+                    map.mapping.insert(i.to_string(), id);
+                }
+            }
+            let f = fs::File::create(p.join(rev.as_str())).unwrap();
+            serde_json::to_writer(f, &map).unwrap();
+        }
+        td
+    }
 
     #[test]
     fn initialize_rev() -> Result<()> {

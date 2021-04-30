@@ -4,8 +4,8 @@ extern crate log;
 use anyhow::{Context, Result};
 use backy_extract::{purgelock, FuseAccess, FuseDirectory};
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyOpen, ReplyWrite, Request, FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
+    ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use std::collections::HashMap;
@@ -139,8 +139,7 @@ impl Filesystem for BackyFS {
             re.add(FUSE_ROOT_ID, 2, FileType::Directory, "..");
         }
         if off < (self.dir.len() as i64) + 2 {
-            for (n, (ino, entry)) in self.dir.iter().enumerate().skip((off - 2).max(0) as usize)
-            {
+            for (n, (ino, entry)) in self.dir.iter().enumerate().skip((off - 2).max(0) as usize) {
                 re.add(*ino, (n + 3) as i64, FileType::RegularFile, &entry.name);
             }
         }
@@ -243,27 +242,32 @@ struct App {
     mountpoint: PathBuf,
 }
 
+impl App {
+    fn run(&self) -> Result<()> {
+        let lock = purgelock(&self.basedir).context("Failed to acquire .purge lock")?;
+        info!("Loading revisions");
+        let fs = BackyFS::init(&self.basedir)?;
+        println!(
+            "Mounting FUSE fileystem... unmount with: fusermount -u '{}'",
+            self.mountpoint.display()
+        );
+        fuse::mount(
+            fs,
+            &self.mountpoint,
+            &[&OsStr::new(&format!(
+                "-ofsname=backy,{}",
+                self.mountopts.join(",")
+            ))],
+        )
+        .context("Failed to mount FUSE filesystem")?;
+        drop(lock);
+        Ok(())
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
-    let app = App::from_args();
-    let lock = purgelock(&app.basedir).context("Failed to acquire .purge lock")?;
-    info!("Loading revisions");
-    let fs = BackyFS::init(&app.basedir)?;
-    println!(
-        "Mounting FUSE fileystem... unmount with: fusermount -u '{}'",
-        app.mountpoint.display()
-    );
-    fuse::mount(
-        fs,
-        &app.mountpoint,
-        &[&OsStr::new(&format!(
-            "-ofsname=backy,{}",
-            app.mountopts.join(",")
-        ))],
-    )
-    .context("Failed to mount FUSE filesystem")?;
-    drop(lock);
-    Ok(())
+    App::from_args().run()
 }
 
 // XXX tests missing

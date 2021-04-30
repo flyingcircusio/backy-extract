@@ -26,10 +26,10 @@ pub enum Error {
     Missized(usize),
     #[error("Compressed chunk does not start with magic number")]
     Magic,
-    #[error("LZO compression format error")]
-    LZO(#[from] minilzo::Error),
+    #[error("Lzo compression format error")]
+    Lzo(#[from] minilzo::Error),
     #[error("I/O error")]
-    IO(#[from] io::Error),
+    Io(#[from] io::Error),
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -50,7 +50,7 @@ fn decompress(f: &mut File) -> Result<Vec<u8>> {
     if compressed[0..5] != MAGIC[..] {
         Err(Error::Magic)
     } else {
-        Ok(minilzo::decompress(&compressed[5..], 1 << CHUNKSZ_LOG).map_err(Error::LZO)?)
+        Ok(minilzo::decompress(&compressed[5..], 1 << CHUNKSZ_LOG).map_err(Error::Lzo)?)
     }
 }
 
@@ -147,7 +147,7 @@ mod tests {
         OpenOptions::new().write(true).open(&file)?.set_len(1000)?;
         let be = Backend::open(s.path())?;
         match be.load("4db6e194fd398e8edb76e11054d73eb0") {
-            Err(Error::LZO(_)) => Ok(()),
+            Err(Error::Lzo(_)) => Ok(()),
             other => panic!("unexpected: {:?}", other),
         }
     }

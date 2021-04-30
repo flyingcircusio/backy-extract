@@ -1,8 +1,8 @@
-mod helper;
+mod common;
 
 use anyhow::{ensure, Result};
 use backy_extract::*;
-use helper::*;
+use common::*;
 use std::fs::{read, remove_file};
 
 #[test]

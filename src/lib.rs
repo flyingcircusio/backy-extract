@@ -6,6 +6,7 @@
 
 mod backend;
 mod chunkvec;
+#[cfg(feature = "fuse_driver")]
 mod fuse_access;
 #[cfg(test)]
 mod test_helper;
@@ -25,8 +26,6 @@ use fs2::FileExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use lazy_static::lazy_static;
 use memmap::MmapMut;
-use num_cpus;
-use smallstr::SmallString;
 use smallvec::SmallVec;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -97,8 +96,6 @@ fn pos2chunk(pos: u64) -> usize {
 fn chunk2pos(seq: usize) -> u64 {
     (seq as u64) << CHUNKSZ_LOG
 }
-
-type RevID = SmallString<[u8; 24]>;
 
 /// Aqcuire 'purge' lock which prevents backy from deleting chunks
 pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
@@ -241,8 +238,7 @@ impl Extractor {
 
         let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
         let total_bytes = thread::scope(|s| -> Result<u64> {
-            let mut hdl = Vec::new();
-            hdl.push(s.spawn(|_| writer.receive(chunk_rx, progress).map_err(Into::into)));
+            let mut hdl = vec![s.spawn(|_| writer.receive(chunk_rx, progress).map_err(Into::into))];
             for threadid in 0..self.threads {
                 let c_tx = chunk_tx.clone();
                 let sd = |t| (&chunks).send_decompressed(t, self.threads, &be, c_tx);
@@ -251,90 +247,11 @@ impl Extractor {
             hdl.push(s.spawn(|_| (&chunks).send_zero(chunk_tx)));
             let total_bytes = self.print_progress(chunks.size, &name, progress_rx);
             hdl.into_iter()
-                .map(|h| h.join().expect("unhandled panic"))
-                .collect::<Result<()>>()?;
+                .try_for_each(|h| h.join().expect("unhandled panic"))?;
             Ok(total_bytes)
         })
         .expect("subthread panic")?;
         self.print_finished(total_bytes, start);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::chunkvec::ChunkID;
-    use backend::MAGIC;
-    use serde::Serialize;
-    use std::collections::HashMap;
-    use std::fs;
-    use std::io::Write;
-    use tempdir::TempDir;
-
-    // Identical to the one in chunkvec.rs, but without borrows
-    #[derive(Debug, Default, Serialize)]
-    struct RevisionMap {
-        mapping: HashMap<String, String>,
-        size: u64,
-    }
-
-    pub fn cid(id: &str) -> ChunkID {
-        ChunkID::from_str(id)
-    }
-
-    pub fn rid(id: &str) -> RevID {
-        RevID::from_str(id)
-    }
-
-    pub fn store(spec: HashMap<RevID, Vec<Option<(ChunkID, Vec<u8>)>>>) -> TempDir {
-        let td = TempDir::new("backy-store-test").expect("tempdir");
-        let p = td.path();
-        for (rev, chunks) in spec {
-            fs::write(
-                p.join(&rev.as_str()).with_extension("rev"),
-                format!(
-                    r#"backend_type: chunked
-parent: JZ3zfSHq24Fy5ENgTgYLGF
-stats:
-    bytes_written: {written}
-    ceph-verification: partial
-    chunk_stats: {{write_full: {nchunks}, write_partial: 0}}
-    duration: 216.60814833641052
-tags: [daily]
-timestamp: 2019-11-14 14:21:18.289+00:00
-trust: trusted
-uuid: {rev}
-"#,
-                    written = chunk2pos(chunks.len()),
-                    nchunks = chunks.len(),
-                    rev = rev.as_str()
-                ),
-            )
-            .expect("write .rev");
-            let mut map = RevisionMap {
-                size: (chunks.len() << CHUNKSZ_LOG) as u64,
-                mapping: Default::default(),
-            };
-            fs::create_dir(p.join("chunks")).ok();
-            fs::write(p.join("chunks/store"), "v2").unwrap();
-            for (i, chunk) in chunks.iter().enumerate() {
-                if let Some(c) = chunk {
-                    let id = c.0.to_string();
-                    let file = p
-                        .join("chunks")
-                        .join(&id[0..2])
-                        .join(format!("{}.chunk.lzo", id));
-                    fs::create_dir_all(file.parent().unwrap()).ok();
-                    let mut f = fs::File::create(file).unwrap();
-                    f.write(&MAGIC).unwrap();
-                    f.write(&minilzo::compress(&c.1).unwrap()).unwrap();
-                    map.mapping.insert(i.to_string(), id);
-                }
-            }
-            let f = fs::File::create(p.join(rev.as_str())).unwrap();
-            serde_json::to_writer(f, &map).unwrap();
-        }
-        td
     }
 }
