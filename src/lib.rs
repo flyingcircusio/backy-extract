@@ -45,7 +45,7 @@ pub enum ExtractError {
     Lock(PathBuf, #[source] io::Error),
     #[error("Error while loading chunk #{seq} ({id})")]
     InvalidChunk {
-        seq: usize,
+        seq: u32,
         id: String,
         source: backend::Error,
     },
@@ -75,7 +75,7 @@ lazy_static! {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Chunk {
     pub data: Data,
-    pub seqs: SmallVec<[usize; 4]>,
+    pub seqs: SmallVec<[u32; 4]>,
 }
 
 /// Block of uncompressed image contents of length (CHUNKSZ).
@@ -87,12 +87,12 @@ pub enum Data {
 }
 
 // Converts file position/size into chunk sequence number
-fn pos2chunk(pos: u64) -> usize {
-    (pos >> CHUNKSZ_LOG) as usize
+fn pos2chunk(pos: u64) -> u32 {
+    (pos >> CHUNKSZ_LOG) as u32
 }
 
 // Converts chunk sequence number into file offset
-fn chunk2pos(seq: usize) -> u64 {
+fn chunk2pos(seq: u32) -> u64 {
     (seq as u64) << CHUNKSZ_LOG
 }
 

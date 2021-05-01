@@ -16,9 +16,9 @@ pub enum Error {
     #[error("Failed to open output file `{}'", .0.display())]
     OutputFile(PathBuf, #[source] io::Error),
     #[error("Failed to write chunk #{0}")]
-    WriteChunk(usize, #[source] io::Error),
+    WriteChunk(u32, #[source] io::Error),
     #[error("Failed to write chunk #{} to `{}'", .0, .1.display())]
-    WriteChunkFile(usize, PathBuf, #[source] io::Error),
+    WriteChunkFile(u32, PathBuf, #[source] io::Error),
     #[error("IPC error")]
     ChannelSend(#[from] SendError<usize>),
 }

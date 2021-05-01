@@ -19,7 +19,7 @@ pub struct RevisionMap<'d> {
 }
 
 impl<'d> IntoIterator for RevisionMap<'d> {
-    type Item = (usize, Option<ChunkId>);
+    type Item = (u32, Option<ChunkId>);
     type IntoIter = RevisionMapIterator<'d>;
 
     fn into_iter(self) -> RevisionMapIterator<'d> {
@@ -28,9 +28,9 @@ impl<'d> IntoIterator for RevisionMap<'d> {
 }
 
 pub struct RevisionMapIterator<'d> {
-    map: HashMap<usize, &'d str>,
-    i: usize,
-    max: usize,
+    map: HashMap<u32, &'d str>,
+    i: u32,
+    max: u32,
 }
 
 impl<'d> RevisionMapIterator<'d> {
@@ -49,7 +49,7 @@ impl<'d> RevisionMapIterator<'d> {
 }
 
 impl<'d> Iterator for RevisionMapIterator<'d> {
-    type Item = (usize, Option<ChunkId>);
+    type Item = (u32, Option<ChunkId>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.i;
@@ -65,7 +65,7 @@ impl<'d> Iterator for RevisionMapIterator<'d> {
 
 /// Mapping chunk_id (relpath) to list of seq_ids which reference it.
 /// This can be thought of a reverse mapping of what is in the revfile.
-type ChunkMap = BTreeMap<ChunkId, SmallVec<[usize; 4]>>;
+type ChunkMap = BTreeMap<ChunkId, SmallVec<[u32; 4]>>;
 
 /// All chunks of a revision, grouped by chunk ID.
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ pub struct ChunkVec {
     /// Map chunk_id -> seqs
     chunks: ChunkMap,
     /// Empty seqs not found in `chunks`
-    zero_seqs: Vec<usize>,
+    zero_seqs: Vec<u32>,
 }
 
 impl ChunkVec {
@@ -105,7 +105,7 @@ impl ChunkVec {
 
     /// Number of chunks to restore
     pub fn len(&self) -> usize {
-        pos2chunk(self.size)
+        pos2chunk(self.size) as usize
     }
 
     /// Reads chunks from disk and decompresses them. The iterator `idx` controls which chunks are
@@ -118,7 +118,7 @@ impl ChunkVec {
         tx: Sender<Chunk>,
     ) -> Result<()> {
         assert!(nthreads > 0 && threadid < nthreads);
-        let mut ids: Vec<(&ChunkId, &SmallVec<[usize; 4]>)> = self
+        let mut ids: Vec<(&ChunkId, &SmallVec<[u32; 4]>)> = self
             .chunks
             .iter()
             .skip(threadid as usize)

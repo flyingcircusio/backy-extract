@@ -163,15 +163,15 @@ impl fmt::Debug for RandomWriteOut {
 }
 
 struct RandomSample {
-    chunks: usize,
-    i: usize,
-    n: usize,
-    dist: Uniform<usize>,
+    chunks: u32,
+    i: u32,
+    n: u32,
+    dist: Uniform<u32>,
     rng: ThreadRng,
 }
 
 impl RandomSample {
-    fn new(chunks: usize) -> Self {
+    fn new(chunks: u32) -> Self {
         Self {
             chunks,
             i: 0,
@@ -183,7 +183,7 @@ impl RandomSample {
 }
 
 impl Iterator for RandomSample {
-    type Item = usize;
+    type Item = u32;
 
     // Cover the first and last chunk in any case and (n-2) random samples in between
     fn next(&mut self) -> Option<Self::Item> {
@@ -197,23 +197,23 @@ impl Iterator for RandomSample {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.n.max(2)))
+        (0, Some(self.n.max(2) as usize))
     }
 }
 
 trait Writer {
-    fn data(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
-    fn zero(&self, file: &File, pos: usize) -> io::Result<()>;
+    fn data(&self, file: &File, seq: u32, data: &[u8]) -> io::Result<()>;
+    fn zero(&self, file: &File, seq: u32) -> io::Result<()>;
 }
 
 struct Continuous;
 
 impl Writer for Continuous {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+    fn data(&self, f: &File, seq: u32, data: &[u8]) -> io::Result<()> {
         f.write_all_at(data, chunk2pos(seq))
     }
 
-    fn zero(&self, f: &File, seq: usize) -> io::Result<()> {
+    fn zero(&self, f: &File, seq: u32) -> io::Result<()> {
         f.write_all_at(&ZERO_CHUNK, chunk2pos(seq))
     }
 }
@@ -223,7 +223,7 @@ struct Sparse;
 const BLKSIZE: usize = 64 * 1024;
 
 impl Writer for Sparse {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+    fn data(&self, f: &File, seq: u32, data: &[u8]) -> io::Result<()> {
         let mut pos = chunk2pos(seq);
         for slice in data.chunks(BLKSIZE) {
             if slice != &ZERO_CHUNK[..BLKSIZE] {
@@ -234,7 +234,7 @@ impl Writer for Sparse {
         Ok(())
     }
 
-    fn zero(&self, _f: &File, _seq: usize) -> io::Result<()> {
+    fn zero(&self, _f: &File, _seq: u32) -> io::Result<()> {
         Ok(())
     }
 }

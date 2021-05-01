@@ -30,7 +30,7 @@ impl<W: Write + Send + Sync> Stream<W> {
         Self { out: Box::new(out) }
     }
 
-    fn write(&mut self, data: &Data, seq: usize, progress: &Sender<usize>) -> Result<()> {
+    fn write(&mut self, data: &Data, seq: u32, progress: &Sender<usize>) -> Result<()> {
         self.out
             .write_all(match data {
                 Data::Some(d) => d,
@@ -88,14 +88,14 @@ impl Queue {
         Queue(BinaryHeap::new())
     }
 
-    fn put(&mut self, seq: usize, data: Rc<Data>) {
+    fn put(&mut self, seq: u32, data: Rc<Data>) {
         self.0.push(WaitingChunk {
             prio: -(seq as isize),
             data,
         })
     }
 
-    fn get(&mut self, expect_seq: usize) -> Option<Rc<Data>> {
+    fn get(&mut self, expect_seq: u32) -> Option<Rc<Data>> {
         if let Some(e) = self.0.peek() {
             if e.prio == -(expect_seq as isize) {
                 return Some(self.0.pop().unwrap().data);
@@ -134,7 +134,7 @@ mod tests {
         for &i in &[1, 3, 0, 2] {
             raw.send(Chunk {
                 seqs: smallvec![i],
-                data: Data::Some(CHUNKS[i].to_vec()),
+                data: Data::Some(CHUNKS[i as usize].to_vec()),
             })
             .expect("cannot send chunks");
         }
