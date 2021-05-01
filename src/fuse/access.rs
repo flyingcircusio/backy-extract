@@ -2,7 +2,7 @@
 
 use crate::backend::{self, Backend};
 use crate::chunkvec::{ChunkId, RevisionMap};
-use crate::{chunk2pos, pos2chunk, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{chunk2pos, pos2chunk, CHUNKSZ, ZERO_CHUNK};
 use chrono::{DateTime, TimeZone, Utc};
 use fnv::FnvHashMap as HashMap;
 use fnv::FnvHashSet as HashSet;
@@ -201,7 +201,7 @@ pub struct FuseAccess {
     cow: HashMap<usize, Page>,
 }
 
-const OFFSET_MASK: u64 = (1 << CHUNKSZ_LOG) - 1;
+const OFFSET_MASK: u64 = CHUNKSZ as u64 - 1;
 
 /// API to read/write images from the upper-level FUSE driver
 ///
@@ -271,7 +271,7 @@ impl FuseAccess {
             }
             _ => {
                 let off = (offset & OFFSET_MASK) as usize;
-                self.read(pos2chunk(offset), off, min(off + size, 1 << CHUNKSZ_LOG))
+                self.read(pos2chunk(offset), off, min(off + size, CHUNKSZ as usize))
             }
         }
     }
@@ -296,7 +296,7 @@ impl FuseAccess {
             if self.current.matches(seq) {
                 return Ok(&self.current[off..end]);
             }
-            info!("{:?}: load #{}+0x{:0x} (read)", self.name, seq, off);
+            info!("{:?}: load #{} (read)", self.name, seq);
             self.current
                 .update(seq, Page::load(&self.map, &self.backend, seq)?);
             self.seen_before.insert(seq);
@@ -310,25 +310,19 @@ impl FuseAccess {
     /// all bytes may be written. In this case, the returned number is less than buf.len() and the
     /// write operation should be retried with the remainder.
     pub fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
-        if offset >= self.size {
+        if offset + buf.len() as u64 > self.size {
             return Err(
                 io::Error::new(io::ErrorKind::UnexpectedEof, "write beyond end of image").into(),
             );
         }
         let seq = pos2chunk(offset);
         let off = offset & OFFSET_MASK;
-        // split large writes that go over a page boundary
+        // writes that go over a page boundary result in a short write
         if pos2chunk(offset + buf.len() as u64 - 1) != seq {
             let in_first_chunk = chunk2pos(1) - off;
-            return self
-                .write_at(offset, &buf[..in_first_chunk as usize])
-                .and_then(|written| {
-                    Ok(written
-                        + self
-                            .write_at(offset + in_first_chunk, &&buf[in_first_chunk as usize..])?)
-                });
+            return self.write_at(offset, &buf[..in_first_chunk as usize]);
         }
-        assert!(off + buf.len() as u64 <= 1 << CHUNKSZ_LOG);
+        assert!(off as usize + buf.len() <= CHUNKSZ as usize);
         let off = off as usize;
         if let Some(page) = self.cow.get_mut(&seq) {
             page.0[off..off + buf.len()].clone_from_slice(buf);
@@ -399,6 +393,7 @@ impl DerefMut for FuseDirectory {
 mod test {
     use super::*;
     use crate::chunkvec::ChunkId;
+    use crate::CHUNKSZ_LOG;
     use backend::MAGIC;
     use maplit::hashmap;
     use serde::Serialize;
@@ -406,6 +401,8 @@ mod test {
     use std::fs;
     use std::io::Write;
     use tempdir::TempDir;
+
+    const SZ: usize = CHUNKSZ as usize;
 
     // Identical to the one in chunkvec.rs, but without borrows
     #[derive(Debug, Default, Serialize)]
@@ -489,7 +486,7 @@ uuid: {rev}
     fn init_map() -> Result<()> {
         let s = store(hashmap! {
             rid("pqEKi7Jfq4bps3NVNEU49K") => vec![
-                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; SZ])),
                 None
             ]
         });
@@ -505,9 +502,9 @@ uuid: {rev}
     fn read_data() -> Result<()> {
         let s = store(hashmap! {
             rid("pqEKi7Jfq4bps3NVNEU49K") => vec![
-                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; SZ])),
                 None,
-                Some((cid("1121cfccd5913f0a63fec40a6ffd44ea"), vec![3u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("1121cfccd5913f0a63fec40a6ffd44ea"), vec![3u8; SZ])),
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
@@ -522,6 +519,8 @@ uuid: {rev}
         assert!(fuse.cow.is_empty());
         // another chunk
         assert!(fuse.read_at(chunk2pos(0), READ_SIZE).is_ok());
+        // read over page boundary -> short read
+        assert_eq!(fuse.read_at((chunk2pos(1)) - 32, READ_SIZE)?, &[1u8; 32]);
         // read over the end -> short read
         assert_eq!(fuse.read_at((chunk2pos(3)) - 32, READ_SIZE)?, &[3u8; 32]);
         // read at end -> []
@@ -535,9 +534,9 @@ uuid: {rev}
     fn caching() -> Result<()> {
         let s = store(hashmap! {
             rid("cachingfq4bps3NVNEU49K") => vec![
-                Some((cid("6746af67f7734d0e9d248a520674f20b"), vec![0u8; 1<<CHUNKSZ_LOG])),
-                Some((cid("7605119f98fc6d4630e1ed49e5f32a6d"), vec![1u8; 1<<CHUNKSZ_LOG])),
-                Some((cid("854e1ff5d5300914e3e65a0cefdc4baf"), vec![2u8; 1<<CHUNKSZ_LOG])),
+                Some((cid("6746af67f7734d0e9d248a520674f20b"), vec![0u8; SZ])),
+                Some((cid("7605119f98fc6d4630e1ed49e5f32a6d"), vec![1u8; SZ])),
+                Some((cid("854e1ff5d5300914e3e65a0cefdc4baf"), vec![2u8; SZ])),
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "cachingfq4bps3NVNEU49K")?;
@@ -571,23 +570,17 @@ uuid: {rev}
     fn all_zero_chunks() -> Result<()> {
         let s = store(hashmap! {rid("pqEKi7Jfq4bps3NVNEU400") => vec![None, None] });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU400")?;
-        assert_eq!(
-            *fuse.read_at(chunk2pos(0), 1 << CHUNKSZ_LOG)?,
-            *vec![0; 1 << CHUNKSZ_LOG]
-        );
-        assert_eq!(
-            *fuse.read_at(chunk2pos(1), 1 << CHUNKSZ_LOG)?,
-            *vec![0; 1 << CHUNKSZ_LOG]
-        );
+        assert_eq!(*fuse.read_at(chunk2pos(0), SZ)?, *vec![0; SZ]);
+        assert_eq!(*fuse.read_at(chunk2pos(1), SZ)?, *vec![0; SZ]);
         Ok(())
     }
 
     #[test]
     fn read_offset() -> Result<()> {
-        let mut data = vec![11u8; 1 << CHUNKSZ_LOG];
+        let mut data = vec![11u8; SZ];
         data[..10].clone_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let s = store(hashmap! {rid("MmE1MThjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("25d4f2a86deb5e2574bb3210b67bb24f"), vec![1u8; 1<<CHUNKSZ_LOG])),
+            Some((cid("25d4f2a86deb5e2574bb3210b67bb24f"), vec![1u8; SZ])),
             Some((cid("a1fb50e6c86fae1679ef3351296fd671"), data)),
         ]});
         let mut fuse = FuseAccess::load(s.path(), "MmE1MThjMDZmMWQ5Y2JkMG")?;
@@ -600,10 +593,10 @@ uuid: {rev}
 
     #[test]
     fn write_cow() -> Result<()> {
-        let mut data = vec![11u8; 1 << CHUNKSZ_LOG];
+        let mut data = vec![11u8; SZ];
         data[..10].clone_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let s = store(hashmap! {rid("XmE1MThjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![10u8; 1<<CHUNKSZ_LOG])),
+            Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![10u8; SZ])),
             Some((cid("01fb50e6c86fae1679ef3351296fd671"), data))
         ]});
         let mut fuse = FuseAccess::load(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
@@ -614,8 +607,8 @@ uuid: {rev}
         // write at page boundary
         assert_eq!(fuse.write_at(chunk2pos(1) - 4, &[0, 1, 2, 3])?, 4);
         assert_eq!(fuse.read_at(chunk2pos(1) - 5, 5)?, &[10, 0, 1, 2, 3]);
-        // write over page boundary
-        assert_eq!(fuse.write_at(chunk2pos(1) - 2, &[20, 21, 22, 23])?, 4);
+        // write over page boundary -> short write
+        assert_eq!(fuse.write_at(chunk2pos(1) - 2, &[20, 21, 22, 23])?, 2);
         assert_eq!(
             fuse.read_at(chunk2pos(1) - 4, 4)?,
             &[
@@ -626,10 +619,11 @@ uuid: {rev}
         assert_eq!(
             fuse.read_at(chunk2pos(1), 5)?,
             &[
-                22, 23, // newly written to page 1
-                2, 3, 4 // original contents of page 1
+                0, 1, 2, 3, 4 // original contents of page 1
             ]
         );
+        // write exactly to EOF
+        assert_eq!(fuse.write_at(chunk2pos(2) - 2, &[8, 9])?, 2);
         // write over EOF
         assert!(fuse.write_at(chunk2pos(2) - 2, &[4, 5, 6, 7]).is_err());
         Ok(())
@@ -647,8 +641,8 @@ uuid: {rev}
     #[test]
     fn missing_chunk() -> Result<()> {
         let s = store(hashmap! {rid("missingjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("7d0eae958fb3a9889774603cd049716b"), vec![1u8; 1<<CHUNKSZ_LOG])),
-            Some((cid("95d2a0ce9869d4ec1395b7a7c8fae0c9"), vec![2u8; 1<<CHUNKSZ_LOG])),
+            Some((cid("7d0eae958fb3a9889774603cd049716b"), vec![1u8; SZ])),
+            Some((cid("95d2a0ce9869d4ec1395b7a7c8fae0c9"), vec![2u8; SZ])),
         ]});
         fs::remove_file(
             s.path()
@@ -666,7 +660,7 @@ uuid: {rev}
     #[test]
     fn broken_map() -> Result<()> {
         let s = store(hashmap! {rid("brokenhjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("6f9d15addefbbee6d9190df64706c58f"), vec![0u8; 1<<CHUNKSZ_LOG])),
+            Some((cid("6f9d15addefbbee6d9190df64706c58f"), vec![0u8; SZ])),
         ]});
         fs::OpenOptions::new()
             .write(true)

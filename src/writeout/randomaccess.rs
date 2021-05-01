@@ -1,5 +1,5 @@
 use super::{Error, Result, WriteOut, WriteOutBuilder};
-use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -67,12 +67,12 @@ impl RandomWriteOut {
         if self.size <= 2 << CHUNKSZ_LOG {
             return Ok(false);
         }
-        let mut buf = vec![0; 1 << CHUNKSZ_LOG];
+        let mut buf = vec![0; CHUNKSZ as usize];
         let mut dev = File::open(&self.path)?;
         for chunk in RandomSample::new(pos2chunk(self.size)) {
             dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;
             dev.read_exact(&mut buf)?;
-            if buf != ZERO_CHUNK[..] {
+            if *buf != ZERO_CHUNK[..] {
                 return Ok(false);
             }
         }

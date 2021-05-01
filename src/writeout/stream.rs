@@ -1,5 +1,5 @@
 use super::{Error, Result, WriteOut, WriteOutBuilder};
-use crate::{Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{Chunk, Data, CHUNKSZ, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::BinaryHeap;
@@ -37,7 +37,7 @@ impl<W: Write + Send + Sync> Stream<W> {
                 Data::Zero => &ZERO_CHUNK,
             })
             .map_err(|e| Error::WriteChunk(seq, e))?;
-        progress.send(1 << CHUNKSZ_LOG)?;
+        progress.send(CHUNKSZ as usize)?;
         Ok(())
     }
 }
@@ -121,11 +121,10 @@ mod tests {
     use lazy_static::lazy_static;
     use smallvec::smallvec;
 
-    const CS: usize = 1 << CHUNKSZ_LOG;
+    const CS: usize = CHUNKSZ as usize;
 
     lazy_static! {
-        static ref CHUNKS: Vec<Vec<u8>> =
-            vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];
+        static ref CHUNKS: Vec<Vec<u8>> = vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];
     }
 
     #[test]

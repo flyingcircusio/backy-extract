@@ -168,8 +168,29 @@ impl Filesystem for BackyFS {
         reject_node1!("read", ino, re);
         if let Some(entry) = self.dir.get_mut(&ino) {
             let size = size as usize;
-            match entry.read_at(off.try_into().unwrap(), size as usize) {
-                Ok(data) => re.data(&data),
+            let off: usize = off.try_into().unwrap();
+            match entry.read_at(off as u64, size) {
+                Ok(data) => {
+                    if data.is_empty() || data.len() == size as usize {
+                        re.data(&data);
+                    } else {
+                        let mut buf = data.to_vec();
+                        let mut nread = data.len();
+                        buf.reserve(size - nread);
+                        while nread < size {
+                            let data = match entry.read_at((off + nread) as u64, size - nread) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    error!("read(0x{:x} @ {}): {}", ino, off, e);
+                                    return re.error(EIO);
+                                }
+                            };
+                            buf.extend_from_slice(data);
+                            nread += data.len()
+                        }
+                        re.data(&buf);
+                    }
+                }
                 Err(e) => {
                     error!("read(0x{:x} @ {}): {}", ino, off, e);
                     re.error(EIO)
@@ -194,7 +215,7 @@ impl Filesystem for BackyFS {
         reject_node1!("write", ino, re);
         if let Some(entry) = self.dir.get_mut(&ino) {
             match entry.write_at(off.try_into().unwrap(), &data) {
-                Ok(n) if n == data.len() => re.written(n.try_into().expect("overflow")),
+                Ok(n) if n == data.len() => re.written(n.try_into().unwrap()),
                 Ok(n) => {
                     error!(
                         "write(0x{:x} @ {}): short write ({} of {})",
@@ -227,7 +248,7 @@ pub struct App {
     ///
     /// Example: /srv/backy/vm0
     #[structopt(short = "d", long, value_name = "DIRECTORY", default_value = ".")]
-    basedir: PathBuf,
+    pub basedir: PathBuf,
     /// FUSE mount options
     ///
     /// See fuse(8) for possible values. Accepts multiple comma-separated
@@ -238,10 +259,10 @@ pub struct App {
         value_name = "OPTIONS",
         default_value = "allow_root"
     )]
-    mountopts: Vec<String>,
+    pub mountopts: Vec<String>,
     #[structopt(name = "MOUNTPOINT")]
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
-    mountpoint: PathBuf,
+    pub mountpoint: PathBuf,
 }
 
 impl App {

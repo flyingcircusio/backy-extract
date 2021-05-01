@@ -6,7 +6,7 @@
 mod fadvise;
 
 use self::fadvise::{fadvise, POSIX_FADV_DONTNEED};
-use crate::CHUNKSZ_LOG;
+use crate::{CHUNKSZ, CHUNKSZ_LOG};
 use byteorder::{BigEndian, WriteBytesExt};
 use lazy_static::lazy_static;
 use smallvec::{smallvec, SmallVec};
@@ -37,7 +37,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 lazy_static! {
     pub static ref MAGIC: SmallVec<[u8; 5]> = {
         let mut m = smallvec![0xF0];
-        m.write_u32::<BigEndian>(1 << CHUNKSZ_LOG).unwrap();
+        m.write_u32::<BigEndian>(CHUNKSZ).unwrap();
         m
     };
 }
@@ -50,7 +50,7 @@ fn decompress(f: &mut File) -> Result<Vec<u8>> {
     if compressed[0..5] != MAGIC[..] {
         Err(Error::Magic)
     } else {
-        Ok(minilzo::decompress(&compressed[5..], 1 << CHUNKSZ_LOG).map_err(Error::Lzo)?)
+        Ok(minilzo::decompress(&compressed[5..], CHUNKSZ as usize).map_err(Error::Lzo)?)
     }
 }
 
@@ -90,7 +90,7 @@ impl Backend {
     /// on the fly and returned as raw data.
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
         let data = decompress(&mut File::open(self.filename(id))?)?;
-        if data.len() != 1 << CHUNKSZ_LOG {
+        if data.len() != CHUNKSZ as usize {
             Err(Error::Missized(data.len()))
         } else {
             Ok(data)

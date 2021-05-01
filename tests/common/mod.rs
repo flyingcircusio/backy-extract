@@ -2,7 +2,6 @@
 
 use crate::CHUNKSZ_LOG;
 
-use bytes::Bytes;
 use flate2::bufread::GzDecoder;
 use lazy_static::lazy_static;
 use std::fs::{write, File};
@@ -13,11 +12,11 @@ use tempdir::TempDir;
 
 lazy_static! {
     pub static ref FIXTURES: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-    pub static ref IMAGE: Bytes = {
+    pub static ref IMAGE: Vec<u8> = {
         let f = BufReader::new(File::open(FIXTURES.join("image.gz")).expect("fopen image.gz"));
         let mut buf = Vec::with_capacity(4 << CHUNKSZ_LOG);
         GzDecoder::new(f).read_to_end(&mut buf).expect("gunzip");
-        buf.into()
+        buf
     };
 }
 

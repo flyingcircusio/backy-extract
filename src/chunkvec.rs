@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ_LOG};
+use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ};
 
 use crossbeam::channel::Sender;
 use serde::Deserialize;
@@ -84,7 +84,7 @@ impl ChunkVec {
         let rev: RevisionMap<'d> =
             serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
-        if size % (1 << CHUNKSZ_LOG) != 0 {
+        if size % CHUNKSZ as u64 != 0 {
             return Err(ExtractError::UnalignedSize(rev.size));
         }
         let mut chunks = BTreeMap::new();

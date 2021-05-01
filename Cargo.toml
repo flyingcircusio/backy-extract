@@ -1,6 +1,6 @@
 [package]
 name = "backy-extract"
-version = "0.3.2-dev"
+version = "0.3.2-beta"
 authors = ["Christian Kauhaus <christian@kauhaus.de>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
@@ -46,11 +46,12 @@ path = "src/bin/backy-fuse.rs"
 required-features = [ "fuse_driver" ]
 
 [dev-dependencies]
-bytes = "1"
-flate2 = "1.0"
+flate2 = "1"
 maplit = "1"
+shells = "0.2"
 tar = "0.4"
 tempdir = "0.3"
+twoway = "0.2"
 
 [profile.release]
 panic = "abort"

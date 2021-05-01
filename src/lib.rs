@@ -60,11 +60,12 @@ pub enum ExtractError {
 type Result<T, E = ExtractError> = std::result::Result<T, E>;
 
 /// Size of an uncompressed Chunk in the backy store as 2's exponent.
-// The resulting value must be a u32 because it is encoded as 32 bit uint the chunk file header.
 pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
+pub const CHUNKSZ: u32 = 1 << CHUNKSZ_LOG; // The value must fit into u32 because it is encoded
+                                           // as 32 bit uint the chunk header.
 
 lazy_static! {
-    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(1 << CHUNKSZ_LOG).expect("mmap");
+    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSZ as usize).expect("mmap");
 }
 
 /// Transport of a single image data chunk.
@@ -77,7 +78,7 @@ pub struct Chunk {
     pub seqs: SmallVec<[usize; 4]>,
 }
 
-/// Block of uncompressed image contents of length (1 << CHUNKSZ_LOG).
+/// Block of uncompressed image contents of length (CHUNKSZ).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Data {
     Some(Vec<u8>),

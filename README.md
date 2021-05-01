@@ -55,7 +55,7 @@ Usage
 2. Pick a revision and create loop device:
    `losetup -f -P --show /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7`
 3. Create loop mount:
-   `mount -oloop /dev/loop0p1 /mnt/restore`
+   `mount -oro /dev/loop0p1 /mnt/restore`
 
 When finished, the above stops must be reversed:
 
@@ -84,5 +84,5 @@ https://github.com/flyingcircusio/backy-extract/.
 Author
 ======
 
-Contact [Christian Kauhaus](mailto:kc@flyingcircus.io) for questions, suggestions, and
-bug fixes.
+Contact [Christian Kauhaus](mailto:christian@kauhaus.de) for questions,
+suggestions, and bug fixes.
