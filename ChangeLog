@@ -1,3 +1,10 @@
+2021-05-15  Christian Kauhaus <christian@kauhaus.de>
+
+	* Release backy-extract 1.0.0
+	* Rework FUSE caching.
+	* Add `-c`/`--cache` option
+	* Rework README and man page
+
 2021-05-04  Christian Kauhaus <christian@kauhaus.de>
 
 	* Release backy-extract 0.3.2

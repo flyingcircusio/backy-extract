@@ -44,6 +44,7 @@ impl FuseMount {
                 basedir,
                 mountopts: Vec::new(),
                 mountpoint,
+                ..Default::default()
             }
             .run()
             .unwrap();

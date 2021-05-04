@@ -2,7 +2,7 @@ backy-extract
 =============
 
 High-performance, standalone backup restore tool for
-[backy](https://bitbucket.org/flyingcircus/backy). backy-extract restores a
+[backy](https://github.com/flyingcircusio/backy). backy-extract restores a
 specified backup revision to stdout or a file/block device target.
 
 

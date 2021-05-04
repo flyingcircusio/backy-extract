@@ -5,11 +5,12 @@ use crate::purgelock;
 
 use anyhow::{Context, Result};
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request, FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use log::{error, info, warn};
+use std::cmp::max;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
@@ -58,14 +59,14 @@ fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
     }
 }
 
-struct BackyFS {
+struct BackyFs {
     dir: FuseDirectory,
     reverse: HashMap<OsString, u64>,
 }
 
-impl BackyFS {
-    fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
-        let dir = FuseDirectory::init(dir)?;
+impl BackyFs {
+    fn init<P: AsRef<Path>>(dir: P, cache_size: usize) -> Result<Self> {
+        let dir = FuseDirectory::init(dir, cache_size)?;
         let mut reverse = HashMap::new();
         for (ino, entry) in dir.iter() {
             reverse.insert(entry.name.to_owned(), *ino);
@@ -84,7 +85,7 @@ macro_rules! reject_node1(
     }
 );
 
-impl Filesystem for BackyFS {
+impl Filesystem for BackyFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, re: ReplyEntry) {
         if parent != FUSE_ROOT_ID {
             warn!("lookup(): trying to use an invalid base directory");
@@ -164,38 +165,52 @@ impl Filesystem for BackyFS {
         }
     }
 
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _fl: u32,
+        _owner: u64,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        if let Some(entry) = self.dir.get_mut(&ino) {
+            entry.cleanup();
+            reply.ok();
+        }
+    }
+
     fn read(&mut self, _r: &Request, ino: u64, _fh: u64, off: i64, size: u32, re: ReplyData) {
         reject_node1!("read", ino, re);
         if let Some(entry) = self.dir.get_mut(&ino) {
-            let size = size as usize;
             let off: usize = off.try_into().unwrap();
-            match entry.read_at(off as u64, size) {
-                Ok(data) => {
-                    if data.is_empty() || data.len() == size as usize {
-                        re.data(&data);
-                    } else {
-                        let mut buf = data.to_vec();
-                        let mut nread = data.len();
-                        buf.reserve(size - nread);
-                        while nread < size {
-                            let data = match entry.read_at((off + nread) as u64, size - nread) {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    error!("read(0x{:x} @ {}): {}", ino, off, e);
-                                    return re.error(EIO);
-                                }
-                            };
-                            buf.extend_from_slice(data);
-                            nread += data.len()
-                        }
-                        re.data(&buf);
-                    }
-                }
+            let size = size as usize;
+            let data = match entry.read_at(off as u64, size) {
+                Ok(data) => data,
                 Err(e) => {
                     error!("read(0x{:x} @ {}): {}", ino, off, e);
-                    re.error(EIO)
+                    return re.error(EIO);
                 }
+            };
+            if data.len() >= size || data.is_empty() {
+                // fast path: read_at gave us all at once
+                return re.data(data);
             }
+            let mut buf = Vec::with_capacity(size);
+            buf.extend_from_slice(data);
+            while buf.len() < size {
+                buf.extend_from_slice(
+                    match entry.read_at((off + buf.len()) as u64, size - buf.len()) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            error!("read(0x{:x} @ {}): {}", ino, off, e);
+                            return re.error(EIO);
+                        }
+                    },
+                );
+            }
+            re.data(&buf);
         } else {
             info!("read(0x{:x}): not found", ino);
             re.error(ENOENT);
@@ -224,11 +239,11 @@ impl Filesystem for BackyFS {
                         n,
                         data.len()
                     );
-                    re.error(EIO)
+                    re.error(EIO);
                 }
                 Err(e) => {
                     error!("write(0x{:x} @ {}): {}", ino, off, e);
-                    re.error(EIO)
+                    re.error(EIO);
                 }
             }
         } else {
@@ -238,7 +253,7 @@ impl Filesystem for BackyFS {
     }
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Default, StructOpt)]
 /// Access backy images via FUSE
 ///
 /// backy-fuse maps all revisions for a specific target under a FUSE
@@ -252,7 +267,7 @@ pub struct App {
     /// FUSE mount options
     ///
     /// See fuse(8) for possible values. Accepts multiple comma-separated
-    /// values.
+    /// values
     #[structopt(
         short = "o",
         long,
@@ -260,6 +275,9 @@ pub struct App {
         default_value = "allow_root"
     )]
     pub mountopts: Vec<String>,
+    /// Size of the read-only chunk cache in MiB
+    #[structopt(short, long, value_name = "SIZE", default_value = "256")]
+    pub cache: usize,
     #[structopt(name = "MOUNTPOINT")]
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
     pub mountpoint: PathBuf,
@@ -269,7 +287,7 @@ impl App {
     pub fn run(&self) -> Result<()> {
         let lock = purgelock(&self.basedir).context("Failed to acquire .purge lock")?;
         info!("Loading revisions");
-        let fs = BackyFS::init(&self.basedir)?;
+        let fs = BackyFs::init(&self.basedir, max(self.cache, 16) << 20)?;
         println!(
             "Mounting FUSE fileystem... unmount with: fusermount -u '{}'",
             self.mountpoint.display()
