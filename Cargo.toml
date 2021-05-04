@@ -1,6 +1,6 @@
 [package]
 name = "backy-extract"
-version = "0.3.2"
+version = "0.3.3-dev"
 authors = ["Christian Kauhaus <christian@kauhaus.de>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
@@ -10,7 +10,6 @@ repository = "https://github.com/flyingcircusio/backy-extract"
 [dependencies]
 anyhow = "1"
 atty = "0.2"
-bitvec = "0.21"
 byteorder = "1.2"
 chrono = "0.4"
 clap = { version = "2.32", features = ["wrap_help"] }
