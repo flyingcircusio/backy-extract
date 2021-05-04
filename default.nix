@@ -19,14 +19,14 @@ let
 in
 rustPlatform.buildRustPackage rec {
   name = "backy-extract";
-  version = "0.3.0";
+  version = "0.3.2-beta";
 
   src = lib.cleanSourceWith {
     filter = n: t: (excludeTarget n t) && (lib.cleanSourceFilter n t);
     src = ./.;
   };
 
-  nativeBuildInputs = [ docutils jq ];
+  nativeBuildInputs = [ docutils jq pkgconfig ];
 
   buildInputs =
     [ lzo ] ++
@@ -40,7 +40,7 @@ rustPlatform.buildRustPackage rec {
     fi
   '';
 
-  cargoSha256 = "1nsdj0sxprf3lml9sfa2l6i5824d6r4m3nb4sidj615ycd3bb2xq";
+  cargoSha256 = "0rmga1axx8i04n68vwlwgpvis818smjpkvdwgaxdx122lc600l8c";
   cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
 
   meta = with lib; {

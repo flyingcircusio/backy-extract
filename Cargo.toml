@@ -1,7 +1,7 @@
 [package]
 name = "backy-extract"
-version = "0.3.2-dev"
-authors = ["Christian Kauhaus <kc@flyingcircus.io>"]
+version = "0.3.2-beta"
+authors = ["Christian Kauhaus <christian@kauhaus.de>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
 license = "BSD-3-Clause"
@@ -10,10 +10,11 @@ repository = "https://github.com/flyingcircusio/backy-extract"
 [dependencies]
 anyhow = "1"
 atty = "0.2"
+bitvec = "0.21"
 byteorder = "1.2"
 chrono = "0.4"
 clap = { version = "2.32", features = ["wrap_help"] }
-console = "0.7"
+console = "0.14"
 crossbeam = "0.7"
 env_logger = "0.7"
 fnv = "1"
@@ -46,10 +47,13 @@ path = "src/bin/backy-fuse.rs"
 required-features = [ "fuse_driver" ]
 
 [dev-dependencies]
-flate2 = "1.0"
+flate2 = "1"
+maplit = "1"
+shells = "0.2"
 tar = "0.4"
 tempdir = "0.3"
-maplit = "1"
+twoway = "0.2"
 
 [profile.release]
 panic = "abort"
+lto = "thin"

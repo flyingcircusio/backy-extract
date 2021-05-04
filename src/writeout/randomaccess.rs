@@ -1,5 +1,5 @@
 use super::{Error, Result, WriteOut, WriteOutBuilder};
-use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::thread;
@@ -38,10 +38,10 @@ impl RandomAccess {
 }
 
 impl WriteOutBuilder for RandomAccess {
-    type Impl = RAWriteOut;
+    type Impl = RandomWriteOut;
 
     fn build(self, size: u64, threads: u8) -> Self::Impl {
-        RAWriteOut {
+        RandomWriteOut {
             path: self.path,
             sparse: self.sparse,
             size,
@@ -51,14 +51,14 @@ impl WriteOutBuilder for RandomAccess {
 }
 
 #[derive(Clone, Default)]
-pub struct RAWriteOut {
+pub struct RandomWriteOut {
     path: PathBuf,
     sparse: Option<bool>,
     size: u64,
     threads: u8,
 }
 
-impl RAWriteOut {
+impl RandomWriteOut {
     // Heuristic: read the first and the last chunk and 1% of the chunks in between. If there
     // is any non-zero data detected, this device has not been discarded and must be writte in
     // non-sparse mode.
@@ -67,12 +67,12 @@ impl RAWriteOut {
         if self.size <= 2 << CHUNKSZ_LOG {
             return Ok(false);
         }
-        let mut buf = vec![0; 1 << CHUNKSZ_LOG];
+        let mut buf = vec![0; CHUNKSZ as usize];
         let mut dev = File::open(&self.path)?;
         for chunk in RandomSample::new(pos2chunk(self.size)) {
             dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;
             dev.read_exact(&mut buf)?;
-            if buf != &ZERO_CHUNK[..] {
+            if *buf != ZERO_CHUNK[..] {
                 return Ok(false);
             }
         }
@@ -106,32 +106,30 @@ impl RAWriteOut {
         prog: &Sender<usize>,
         writer: &(dyn Writer + Send + Sync),
     ) -> Result<()> {
-        rx.into_iter()
-            .map(|chunk| -> Result<()> {
-                match chunk.data {
-                    Data::Some(ref data) => {
-                        for seq in &chunk.seqs {
-                            writer.data(&f, *seq, data).map_err(|e| {
-                                Error::WriteChunkFile(*seq, self.path.to_owned(), e)
-                            })?;
-                        }
-                    }
-                    Data::Zero => {
-                        for seq in &chunk.seqs {
-                            writer.zero(&f, *seq).map_err(|e| {
-                                Error::WriteChunkFile(*seq, self.path.to_owned(), e)
-                            })?;
-                        }
+        rx.into_iter().try_for_each(|chunk| -> Result<()> {
+            match chunk.data {
+                Data::Some(ref data) => {
+                    for seq in &chunk.seqs {
+                        writer
+                            .data(&f, *seq, data)
+                            .map_err(|e| Error::WriteChunkFile(*seq, self.path.to_owned(), e))?;
                     }
                 }
-                prog.send(chunk.seqs.len() << CHUNKSZ_LOG)?;
-                Ok(())
-            })
-            .collect()
+                Data::Zero => {
+                    for seq in &chunk.seqs {
+                        writer
+                            .zero(&f, *seq)
+                            .map_err(|e| Error::WriteChunkFile(*seq, self.path.to_owned(), e))?;
+                    }
+                }
+            }
+            prog.send(chunk.seqs.len() << CHUNKSZ_LOG)?;
+            Ok(())
+        })
     }
 }
 
-impl WriteOut for RAWriteOut {
+impl WriteOut for RandomWriteOut {
     fn receive(self, chunks: Receiver<Chunk>, progress: Sender<usize>) -> Result<()> {
         let (f, guess) = self
             .open()
@@ -147,8 +145,7 @@ impl WriteOut for RAWriteOut {
                 .collect();
             handles
                 .into_iter()
-                .map(|hdl| hdl.join().expect("thread panic"))
-                .collect::<Result<()>>()
+                .try_for_each(|hdl| -> Result<()> { hdl.join().expect("thread panic") })
         })
         .expect("subthread panic")?;
         Ok(())
@@ -159,22 +156,22 @@ impl WriteOut for RAWriteOut {
     }
 }
 
-impl fmt::Debug for RAWriteOut {
+impl fmt::Debug for RandomWriteOut {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<RAWriteOut {}>", self.path.display())
+        write!(f, "<RandomWriteOut {}>", self.path.display())
     }
 }
 
 struct RandomSample {
-    chunks: usize,
-    i: usize,
-    n: usize,
-    dist: Uniform<usize>,
+    chunks: u32,
+    i: u32,
+    n: u32,
+    dist: Uniform<u32>,
     rng: ThreadRng,
 }
 
 impl RandomSample {
-    fn new(chunks: usize) -> Self {
+    fn new(chunks: u32) -> Self {
         Self {
             chunks,
             i: 0,
@@ -186,7 +183,7 @@ impl RandomSample {
 }
 
 impl Iterator for RandomSample {
-    type Item = usize;
+    type Item = u32;
 
     // Cover the first and last chunk in any case and (n-2) random samples in between
     fn next(&mut self) -> Option<Self::Item> {
@@ -200,23 +197,23 @@ impl Iterator for RandomSample {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.n.max(2)))
+        (0, Some(self.n.max(2) as usize))
     }
 }
 
 trait Writer {
-    fn data(&self, file: &File, pos: usize, data: &[u8]) -> io::Result<()>;
-    fn zero(&self, file: &File, pos: usize) -> io::Result<()>;
+    fn data(&self, file: &File, seq: u32, data: &[u8]) -> io::Result<()>;
+    fn zero(&self, file: &File, seq: u32) -> io::Result<()>;
 }
 
 struct Continuous;
 
 impl Writer for Continuous {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+    fn data(&self, f: &File, seq: u32, data: &[u8]) -> io::Result<()> {
         f.write_all_at(data, chunk2pos(seq))
     }
 
-    fn zero(&self, f: &File, seq: usize) -> io::Result<()> {
+    fn zero(&self, f: &File, seq: u32) -> io::Result<()> {
         f.write_all_at(&ZERO_CHUNK, chunk2pos(seq))
     }
 }
@@ -226,7 +223,7 @@ struct Sparse;
 const BLKSIZE: usize = 64 * 1024;
 
 impl Writer for Sparse {
-    fn data(&self, f: &File, seq: usize, data: &[u8]) -> io::Result<()> {
+    fn data(&self, f: &File, seq: u32, data: &[u8]) -> io::Result<()> {
         let mut pos = chunk2pos(seq);
         for slice in data.chunks(BLKSIZE) {
             if slice != &ZERO_CHUNK[..BLKSIZE] {
@@ -237,7 +234,7 @@ impl Writer for Sparse {
         Ok(())
     }
 
-    fn zero(&self, _f: &File, _seq: usize) -> io::Result<()> {
+    fn zero(&self, _f: &File, _seq: u32) -> io::Result<()> {
         Ok(())
     }
 }
@@ -259,7 +256,7 @@ mod tests {
             f.seek(io::SeekFrom::Start((4 << CHUNKSZ_LOG) - 1))?;
             f.write(b"\0")?;
         }
-        let mut ra = RAWriteOut::default();
+        let mut ra = RandomWriteOut::default();
         ra.path = p;
         ra.size = 4 << CHUNKSZ_LOG;
         ra.guess_sparse()

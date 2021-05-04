@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ_LOG};
+use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ};
 
 use crossbeam::channel::Sender;
 use serde::Deserialize;
@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::IntoIterator;
 
-pub type ChunkID = SmallString<[u8; 32]>;
+pub type ChunkId = SmallString<[u8; 32]>;
 
 // Format of the revision file as deserialized from JSON
 #[derive(Debug, Deserialize)]
@@ -19,7 +19,7 @@ pub struct RevisionMap<'d> {
 }
 
 impl<'d> IntoIterator for RevisionMap<'d> {
-    type Item = (usize, Option<ChunkID>);
+    type Item = (u32, Option<ChunkId>);
     type IntoIter = RevisionMapIterator<'d>;
 
     fn into_iter(self) -> RevisionMapIterator<'d> {
@@ -28,9 +28,9 @@ impl<'d> IntoIterator for RevisionMap<'d> {
 }
 
 pub struct RevisionMapIterator<'d> {
-    map: HashMap<usize, &'d str>,
-    i: usize,
-    max: usize,
+    map: HashMap<u32, &'d str>,
+    i: u32,
+    max: u32,
 }
 
 impl<'d> RevisionMapIterator<'d> {
@@ -49,13 +49,13 @@ impl<'d> RevisionMapIterator<'d> {
 }
 
 impl<'d> Iterator for RevisionMapIterator<'d> {
-    type Item = (usize, Option<ChunkID>);
+    type Item = (u32, Option<ChunkId>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.i;
         self.i += 1;
         if i < self.max {
-            let id: Option<ChunkID> = self.map.remove(&i).map(From::from);
+            let id: Option<ChunkId> = self.map.remove(&i).map(From::from);
             Some((i, id))
         } else {
             None
@@ -65,7 +65,7 @@ impl<'d> Iterator for RevisionMapIterator<'d> {
 
 /// Mapping chunk_id (relpath) to list of seq_ids which reference it.
 /// This can be thought of a reverse mapping of what is in the revfile.
-type ChunkMap = BTreeMap<ChunkID, SmallVec<[usize; 4]>>;
+type ChunkMap = BTreeMap<ChunkId, SmallVec<[u32; 4]>>;
 
 /// All chunks of a revision, grouped by chunk ID.
 #[derive(Debug, Clone)]
@@ -75,16 +75,16 @@ pub struct ChunkVec {
     /// Map chunk_id -> seqs
     chunks: ChunkMap,
     /// Empty seqs not found in `chunks`
-    zero_seqs: Vec<usize>,
+    zero_seqs: Vec<u32>,
 }
 
 impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
     pub fn decode<'d>(input: &'d str) -> Result<Self> {
-        let rev: RevisionMap<'d> = serde_json::from_str(input)
-            .map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
+        let rev: RevisionMap<'d> =
+            serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
-        if size % (1 << CHUNKSZ_LOG) != 0 {
+        if size % CHUNKSZ as u64 != 0 {
             return Err(ExtractError::UnalignedSize(rev.size));
         }
         let mut chunks = BTreeMap::new();
@@ -105,7 +105,7 @@ impl ChunkVec {
 
     /// Number of chunks to restore
     pub fn len(&self) -> usize {
-        pos2chunk(self.size)
+        pos2chunk(self.size) as usize
     }
 
     /// Reads chunks from disk and decompresses them. The iterator `idx` controls which chunks are
@@ -118,7 +118,7 @@ impl ChunkVec {
         tx: Sender<Chunk>,
     ) -> Result<()> {
         assert!(nthreads > 0 && threadid < nthreads);
-        let mut ids: Vec<(&ChunkID, &SmallVec<[usize; 4]>)> = self
+        let mut ids: Vec<(&ChunkId, &SmallVec<[u32; 4]>)> = self
             .chunks
             .iter()
             .skip(threadid as usize)
