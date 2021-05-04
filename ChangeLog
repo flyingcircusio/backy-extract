@@ -1,3 +1,7 @@
+2021-05-04  Christian Kauhaus <christian@kauhaus.de>
+
+	* Release backy-extract 0.3.2
+
 2021-05-01  Christian Kauhaus <christian@kauhaus.de>
 
 	* Fix read errors with FUSE driver.
