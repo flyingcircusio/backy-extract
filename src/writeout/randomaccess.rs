@@ -67,7 +67,7 @@ impl RandomWriteOut {
         if self.size <= 2 << CHUNKSZ_LOG {
             return Ok(false);
         }
-        let mut buf = vec![0; CHUNKSZ as usize];
+        let mut buf = vec![0; CHUNKSZ];
         let mut dev = File::open(&self.path)?;
         for chunk in RandomSample::new(pos2chunk(self.size)) {
             dev.seek(io::SeekFrom::Start(chunk2pos(chunk)))?;

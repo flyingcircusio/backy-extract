@@ -37,7 +37,7 @@ impl<W: Write + Send + Sync> Stream<W> {
                 Data::Zero => &ZERO_CHUNK,
             })
             .map_err(|e| Error::WriteChunk(seq, e))?;
-        progress.send(CHUNKSZ as usize)?;
+        progress.send(CHUNKSZ)?;
         Ok(())
     }
 }
@@ -121,7 +121,7 @@ mod tests {
     use lazy_static::lazy_static;
     use smallvec::smallvec;
 
-    const CS: usize = CHUNKSZ as usize;
+    const CS: usize = CHUNKSZ;
 
     lazy_static! {
         static ref CHUNKS: Vec<Vec<u8>> = vec![vec![0; CS], vec![1; CS], vec![2; CS], vec![3; CS]];

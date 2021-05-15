@@ -1,7 +1,6 @@
 //! High-performance, multi-threaded backy image restore library.
 //!
-//! `backy_extract` reads an backup revision from a
-//! [backy](https://bitbucket.org/flyingcircus/backy) *chunked v2* data store, decompresses it
+//! `backy_extract` reads an backup revision from a backy *chunked v2* data store, decompresses it
 //! on the fly and writes it to a restore target using pluggable writeout modules.
 
 mod backend;
@@ -22,6 +21,7 @@ use crossbeam::channel::{bounded, unbounded, Receiver};
 use crossbeam::thread;
 use fs2::FileExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use jemallocator::Jemalloc;
 use lazy_static::lazy_static;
 use memmap::MmapMut;
 use smallvec::SmallVec;
@@ -30,6 +30,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Error, Debug)]
 pub enum ExtractError {
@@ -61,11 +64,11 @@ type Result<T, E = ExtractError> = std::result::Result<T, E>;
 
 /// Size of an uncompressed Chunk in the backy store as 2's exponent.
 pub const CHUNKSZ_LOG: usize = 22; // 4 MiB
-pub const CHUNKSZ: u32 = 1 << CHUNKSZ_LOG; // The value must fit into u32 because it is encoded
-                                           // as 32 bit uint the chunk header.
+pub const CHUNKSZ: usize = 1 << CHUNKSZ_LOG; // The value must fit into u32 because it is encoded
+                                             // as 32 bit uint the chunk header.
 
 lazy_static! {
-    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSZ as usize).expect("mmap");
+    static ref ZERO_CHUNK: MmapMut = MmapMut::map_anon(CHUNKSZ).expect("mmap");
 }
 
 /// Transport of a single image data chunk.

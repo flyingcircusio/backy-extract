@@ -2,11 +2,11 @@
 , pkgs ? import <nixpkgs> {}
 , stdenv ? pkgs.stdenv
 , lib ? pkgs.lib
-, lzo ? pkgs.lzo
-, fuse ? pkgs.fuse
-, pkgconfig ? pkgs.pkgconfig
 , docutils ? pkgs.docutils
+, fuse ? pkgs.fuse
 , jq ? pkgs.jq
+, lzo ? pkgs.lzo
+, pkgconfig ? pkgs.pkgconfig
 , rustPlatform ? pkgs.rustPlatform
 , Security ? pkgs.darwin.apple_sdk.frameworks.Security
 }:
@@ -19,7 +19,7 @@ let
 in
 rustPlatform.buildRustPackage rec {
   name = "backy-extract";
-  version = "0.3.2-beta";
+  version = "1.0.0-dev";
 
   src = lib.cleanSourceWith {
     filter = n: t: (excludeTarget n t) && (lib.cleanSourceFilter n t);
@@ -31,7 +31,7 @@ rustPlatform.buildRustPackage rec {
   buildInputs =
     [ lzo ] ++
     (lib.optionals stdenv.isDarwin [ Security ]) ++
-    (lib.optionals stdenv.isLinux [ pkgconfig fuse ]);
+    (lib.optionals stdenv.isLinux [ fuse ]);
 
   preConfigure = ''
     if ! cargo read-manifest | jq .version -r | grep -q $version; then
@@ -40,8 +40,22 @@ rustPlatform.buildRustPackage rec {
     fi
   '';
 
-  cargoSha256 = "0rmga1axx8i04n68vwlwgpvis818smjpkvdwgaxdx122lc600l8c";
+  cargoSha256 = "0kfqdhk4n2rfks36pflck79dv4r0x51hz3jny3kgdbbdnnymm3rz";
   cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
+  checkType = "debug";
+
+  postPatch = ''
+    substituteAllInPlace man/*.rst
+  '';
+
+  postBuild = ''
+    mkdir -p $out/share/doc $out/share/man/man1
+    cp README.md $out/share/doc
+    for f in man/*.1.rst; do
+      base="''${f#*/}"
+      rst2man $f > "$out/share/man/man1/''${base%%.rst}"
+    done
+  '';
 
   meta = with lib; {
     description = "Rapid restore tool for backy";
@@ -49,18 +63,4 @@ rustPlatform.buildRustPackage rec {
     maintainers = [ maintainers.ckauhaus ];
     platforms = platforms.unix;
   };
-
-  postPatch = ''
-    substituteAllInPlace man/*.rst
-  '';
-
-  postBuild = ''
-    mkdir -p $out/share/doc
-    cp README.md $out/share/doc
-
-    mkdir -p $out/share/man/man1
-    for f in $man/*.1.rst; do
-      rst2man $f > $out/share/man/man1/''${f%%.rst}
-    done
-  '';
 }

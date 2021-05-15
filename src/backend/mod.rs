@@ -3,16 +3,24 @@
 //! Currently, we support only backy's chunked v2 data store. Other store
 //! formats may follow in the future.
 
-mod fadvise;
+#[cfg(feature = "fuse_driver")]
+mod rev;
+#[cfg(feature = "fuse_driver")]
+pub use rev::{Error as RevError, Rev, RevId};
 
-use self::fadvise::{fadvise, POSIX_FADV_DONTNEED};
-use crate::{CHUNKSZ, CHUNKSZ_LOG};
+mod fadvise;
+use fadvise::{fadvise, POSIX_FADV_DONTNEED};
+
+use crate::CHUNKSZ;
+
 use byteorder::{BigEndian, WriteBytesExt};
 use lazy_static::lazy_static;
+use log::debug;
+use memmap::Mmap;
 use smallvec::{smallvec, SmallVec};
+use std::convert::TryFrom;
 use std::fs::{read_to_string, File};
 use std::io;
-use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -37,26 +45,28 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 lazy_static! {
     pub static ref MAGIC: SmallVec<[u8; 5]> = {
         let mut m = smallvec![0xF0];
-        m.write_u32::<BigEndian>(CHUNKSZ).unwrap();
+        m.write_u32::<BigEndian>(u32::try_from(CHUNKSZ).unwrap())
+            .unwrap();
         m
     };
 }
 
-fn decompress(f: &mut File) -> Result<Vec<u8>> {
-    let mut compressed = Vec::with_capacity(1 << (CHUNKSZ_LOG - 1));
-    f.read_to_end(&mut compressed)?;
+fn decompress(f: File) -> Result<Vec<u8>> {
+    debug!("read lzo from {:?}", f);
     fadvise(&f, POSIX_FADV_DONTNEED);
+    let buf = unsafe { Mmap::map(&f)? };
     // first 5 bytes contain header
-    if compressed[0..5] != MAGIC[..] {
+    if buf[0..5] != MAGIC[..] {
         Err(Error::Magic)
     } else {
-        Ok(minilzo::decompress(&compressed[5..], CHUNKSZ as usize).map_err(Error::Lzo)?)
+        debug!("decompressing {} bytes", buf.len() - 5);
+        Ok(minilzo::decompress(&buf[5..], CHUNKSZ).map_err(Error::Lzo)?)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Backend {
-    dir: PathBuf,
+    pub dir: PathBuf,
 }
 
 impl Backend {
@@ -88,9 +98,13 @@ impl Backend {
 
     /// Loads compressed chunk identified by `id`. The chunk is decompressed
     /// on the fly and returned as raw data.
+    ///
+    /// # Errors
+    ///
+    /// Fails with Error::Missized if decompressed data does not fix exactly into a chunk.
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
-        let data = decompress(&mut File::open(self.filename(id))?)?;
-        if data.len() != CHUNKSZ as usize {
+        let data = decompress(File::open(self.filename(id))?)?;
+        if data.len() != CHUNKSZ {
             Err(Error::Missized(data.len()))
         } else {
             Ok(data)
@@ -152,5 +166,3 @@ mod tests {
         }
     }
 }
-// TODO:
-// Test short chunk

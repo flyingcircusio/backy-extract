@@ -1,23 +1,20 @@
 //! Fuse-driven access to revisions with in-memory COW
 
-use crate::backend::{self, Backend};
+use crate::backend::{self, Backend, Rev, RevError};
 use crate::chunkvec::{ChunkId, RevisionMap};
-use crate::{chunk2pos, pos2chunk, CHUNKSZ, ZERO_CHUNK};
+use crate::{pos2chunk, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
 
-use bitvec::vec::BitVec;
-use chrono::{DateTime, TimeZone, Utc};
 use fnv::FnvHashMap as HashMap;
 use log::{debug, info};
-use serde::{Deserialize, Deserializer};
-use smallstr::SmallString;
+use lru::LruCache;
 use std::cmp::min;
-use std::collections::hash_map::Entry;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
@@ -26,12 +23,7 @@ static ID_SEQ: AtomicU64 = AtomicU64::new(4);
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("I/O error")]
-    IO(#[from] io::Error),
-    #[error("Invalid data in .rev file '{}'", path.display())]
-    ParseRev {
-        path: PathBuf,
-        source: serde_yaml::Error,
-    },
+    Io(#[from] io::Error),
     #[error("Invalid data in chunk map file '{}'", path.display())]
     ParseMap {
         path: PathBuf,
@@ -44,63 +36,85 @@ pub enum Error {
         chunk_id: ChunkId,
         source: backend::Error,
     },
-    #[error("Unknown backend_type '{}' found in {}", betype, path.display())]
-    WrongType { betype: String, path: PathBuf },
     #[error("Invalid revision file name '{}'", .0.display())]
     InvalidName(PathBuf),
     #[error("'{}' contains no revision or no chunks - is this really a backy directory?",
             .0.display())]
     NoRevisions(PathBuf),
+    #[error(transparent)]
+    Rev(#[from] RevError),
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 type Chunks = Vec<Option<ChunkId>>;
 
-#[derive(Clone, Default)]
-struct Page(Box<[u8]>);
+#[derive(Clone)]
+struct Page {
+    data: Rc<Vec<u8>>,
+    seq: u32,
+}
 
 impl Page {
-    /// Fetches a chunk from the backend
+    /// Fetches a chunk from the backend.
     ///
     /// Panics if the requested page is a zero page and thus not present in the backend.
     fn load(map: &[Option<ChunkId>], backend: &Backend, seq: u32) -> Result<Self> {
         let cid = map[seq as usize]
             .clone()
             .unwrap_or_else(|| panic!("failed to locate chunk {} in map", seq));
-        Ok(backend
-            .load(cid.as_str())
-            .map_err(|e| Error::BackendLoad {
+        Ok((
+            backend.load(cid.as_str()).map_err(|e| Error::BackendLoad {
                 chunk_id: cid,
                 source: e,
-            })?
+            })?,
+            seq,
+        )
             .into())
     }
-}
 
-impl From<Vec<u8>> for Page {
-    fn from(data: Vec<u8>) -> Self {
-        Self(data.into_boxed_slice())
+    /// Overwrites data region inside page. Panics if updated regions exceeds boundaries.
+    ///
+    /// The page gets copied before writing if other pages are around.
+    fn update(&mut self, off: usize, new: &[u8]) {
+        assert!(off + new.len() <= CHUNKSZ, "Page update exceeds page size");
+        Rc::make_mut(&mut self.data)[off..off + new.len()].clone_from_slice(new);
+    }
+
+    fn set_seq(mut self, seq: u32) -> Self {
+        self.seq = seq;
+        self
     }
 }
 
+impl From<(Vec<u8>, u32)> for Page {
+    fn from(data: (Vec<u8>, u32)) -> Self {
+        Self {
+            data: data.0.into(),
+            seq: data.1,
+        }
+    }
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            data: Default::default(),
+            seq: u32::MAX,
+        }
+    }
+}
 impl Deref for Page {
-    type Target = [u8];
+    type Target = Rc<Vec<u8>>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Page {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &self.data
     }
 }
 
 impl fmt::Debug for Page {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_empty() {
+        if self.data.is_empty() {
             write!(f, "Page[]")
         } else {
             write!(f, "Page[...]")
@@ -108,159 +122,81 @@ impl fmt::Debug for Page {
     }
 }
 
-type RevID = SmallString<[u8; 24]>;
-
-fn revid_de<'de, D>(deserializer: D) -> Result<RevID, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(RevID::from_string(String::deserialize(deserializer)?))
-}
-
-static TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f%z";
-fn timestamp_de<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Utc.datetime_from_str(&String::deserialize(deserializer)?, TIMESTAMP_FORMAT)
-        .map_err(serde::de::Error::custom)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RevStats {
-    pub bytes_written: u64,
-    pub duration: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Rev {
-    pub backend_type: String,
-    #[serde(deserialize_with = "revid_de")]
-    pub parent: RevID,
-    pub stats: RevStats,
-    #[serde(deserialize_with = "timestamp_de")]
-    pub timestamp: DateTime<Utc>,
-    pub trust: String,
-    #[serde(deserialize_with = "revid_de")]
-    pub uuid: RevID,
-}
-
-impl Rev {
-    fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
-        let map = dir.as_ref().join(id.as_ref());
-        let rev = map.with_extension("rev");
-        let r: Self =
-            serde_yaml::from_reader(fs::File::open(&rev)?).map_err(|source| Error::ParseRev {
-                path: rev.to_path_buf(),
-                source,
-            })?;
-        if r.backend_type != "chunked" {
-            return Err(Error::WrongType {
-                betype: r.backend_type.to_owned(),
-                path: rev.to_owned(),
-            });
-        }
-        Ok(r)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ROCache {
-    seq: u32,
-    data: Page,
-}
-
-impl ROCache {
-    fn matches(&self, seq: u32) -> bool {
-        self.seq == seq && !self.data.is_empty()
-    }
-
-    fn update(&mut self, seq: u32, data: Page) {
-        self.seq = seq;
-        self.data = data;
-    }
-}
-
-impl Deref for ROCache {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.data.deref()
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FuseAccess {
-    pub path: PathBuf,
     pub name: OsString,
     pub rev: Rev,
     pub size: u64,
     map: Chunks,
     backend: Backend,
-    current: ROCache,
-    seen_before: BitVec,
-    cache: HashMap<u32, Page>,
+    open_page: Page,
+    zero_page: Page,
+    dirty: HashMap<u32, Page>,
+    ro_cache: LruCache<u32, Page>,
 }
 
 const OFFSET_MASK: u64 = CHUNKSZ as u64 - 1;
 
-/// API to read/write images from the upper-level FUSE driver
+/// API to read/write images from the upper-level FUSE driver.
 ///
 /// This layer implements simple CoW caching. Pages are put into the cache
 /// either when they are written to or when they are read for the second time.
 /// Modifications are only stored in memory and never written to disk. This
 /// enables filesystem tools like fsck to perform recovery.
 impl FuseAccess {
-    fn new<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
+    fn new<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I, cache_size: usize) -> Result<Self> {
         let dir = dir.as_ref();
-        let path = dir.join(id.as_ref());
-        let name = OsString::from(path.file_name().expect("revision without path"));
-        let rev = Rev::load(dir, id)?;
+        let rev = Rev::load(dir, id.as_ref())?;
         let backend = Backend::open(dir)?;
         Ok(Self {
-            path,
-            name,
+            name: OsString::from(id.as_ref()),
             rev,
             size: 0,             // initialized by load_map()
             map: Vec::default(), // initialized by load_map()
             backend,
-            current: ROCache::default(),
-            seen_before: BitVec::default(),
-            cache: HashMap::default(),
+            open_page: Page::default(),
+            zero_page: Page::from((Vec::from(ZERO_CHUNK.as_ref()), u32::MAX)),
+            dirty: HashMap::default(),
+            ro_cache: LruCache::new(cache_size >> CHUNKSZ_LOG),
         })
     }
 
     #[cfg(test)]
     fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
-        let mut res = Self::new(dir, id)?;
+        let mut res = Self::new(dir, id, 64 << 20)?;
         res.load_map()?;
         Ok(res)
     }
 
-    #[allow(unused)]
-    /// Loads chunk map from basedir
+    /// Loads chunk map from basedir.
     ///
     /// Returns number of chunks found in the map. This function is idempotent: If the map is
     /// already initialized, nothing happens.
     pub fn load_if_empty(&mut self) -> Result<()> {
         if self.map.is_empty() {
-            let n = self.load_map()?;
-            debug!("Loaded {} chunks from chunk map {:?}", n, self.name);
+            self.load_map()?;
+            debug!(
+                "Loaded {} chunks from chunk map {:?}",
+                self.map.len(),
+                self.name
+            );
         }
         Ok(())
     }
 
-    fn load_map(&mut self) -> Result<usize> {
-        let revmap_s = fs::read_to_string(&self.path)?;
+    fn load_map(&mut self) -> Result<()> {
+        let path = self.backend.dir.join(&self.name);
+        let revmap_s = fs::read_to_string(&path)?;
         let revmap: RevisionMap =
-            serde_json::from_str(&revmap_s).map_err(|source| Error::ParseMap {
-                path: self.path.to_owned(),
-                source,
-            })?;
+            serde_json::from_str(&revmap_s).map_err(|source| Error::ParseMap { path, source })?;
         self.size = revmap.size;
         self.map = revmap.into_iter().map(|(_seq, id)| id).collect();
-        self.seen_before.resize(self.map.len(), false);
-        Ok(self.map.len())
+        Ok(())
+    }
+
+    /// Drops read only cache to conserve memory. Note that the dirty page cache remains.
+    pub fn cleanup(&mut self) {
+        self.ro_cache.clear()
     }
 
     /// Seeks to offset and reads the specified amount of bytes. Note that this function may
@@ -273,38 +209,32 @@ impl FuseAccess {
             }
             _ => {
                 let off = (offset & OFFSET_MASK) as usize;
-                self.read(pos2chunk(offset), off, min(off + size, CHUNKSZ as usize))
+                let seq = pos2chunk(offset);
+                if self.open_page.seq != seq {
+                    self.open_page = self.read(seq)?;
+                }
+                Ok(&self.open_page[off..min(off + size, CHUNKSZ)])
             }
         }
     }
 
     /// Returns data from chunk `seq`. Data is fetched from the cache or loaded from disk if
-    /// necessary. The cache is filled only on the second read access to a specific page. This
-    /// keeps the cache clean of purely sequential reads.
-    ///
-    /// Note that this function may return less that the requested amount of data.
-    fn read(&mut self, seq: u32, off: usize, end: usize) -> Result<&[u8]> {
-        match self.cache.entry(seq) {
-            Entry::Vacant(e) => {
-                if !self.current.matches(seq) && self.seen_before[seq as usize] {
-                    info!("{:?}: cache #{} (seen twice)", self.name, seq);
-                    let page = Page::load(&self.map, &self.backend, seq)?;
-                    return Ok(&e.insert(page)[off..end]);
-                }
-            }
-            Entry::Occupied(e) => return Ok(&e.into_mut()[off..end]),
-        }
-        if self.map[seq as usize].is_some() {
-            if self.current.matches(seq) {
-                return Ok(&self.current[off..end]);
-            }
-            info!("{:?}: load #{} (read)", self.name, seq);
-            self.current
-                .update(seq, Page::load(&self.map, &self.backend, seq)?);
-            self.seen_before.set(seq as usize, true);
-            Ok(&self.current[off..end])
+    /// necessary.
+    fn read(&mut self, seq: u32) -> Result<Page> {
+        if let Some(page) = self.dirty.get(&seq) {
+            debug!("{:?}: hit #{} (dirty)", self.name, seq);
+            Ok(page.clone())
+        } else if let Some(page) = self.ro_cache.get(&seq) {
+            debug!("{:?}: hit #{}", self.name, seq);
+            Ok(page.clone())
+        } else if self.map[seq as usize].is_none() {
+            debug!("{:?}: zero #{}", self.name, seq);
+            Ok(self.zero_page.clone())
         } else {
-            Ok(&ZERO_CHUNK[off..end])
+            info!("{:?}: load #{}", self.name, seq);
+            let page = Page::load(&self.map, &self.backend, seq)?;
+            self.ro_cache.put(seq, page.clone());
+            Ok(page)
         }
     }
 
@@ -319,37 +249,48 @@ impl FuseAccess {
         }
         let seq = pos2chunk(offset);
         let off = offset & OFFSET_MASK;
-        // writes that go over a page boundary result in a short write
-        if pos2chunk(offset + buf.len() as u64 - 1) != seq {
-            let in_first_chunk = chunk2pos(1) - off;
-            return self.write_at(offset, &buf[..in_first_chunk as usize]);
-        }
-        assert!(off as usize + buf.len() <= CHUNKSZ as usize);
-        let off = off as usize;
-        if let Some(page) = self.cache.get_mut(&seq) {
-            page.0[off..off + buf.len()].clone_from_slice(buf);
+        // writes that go over a page boundary are only partially written
+        let buf = if pos2chunk(offset + buf.len() as u64 - 1) != seq {
+            &buf[..CHUNKSZ - off as usize]
         } else {
-            info!("{:?}: cache #{} (write)", self.name, seq);
-            let mut p = if self.map[seq as usize].is_some() {
+            buf
+        };
+        self.write(seq, off as usize, buf)
+    }
+
+    fn write(&mut self, seq: u32, off: usize, buf: &[u8]) -> Result<usize> {
+        // resets reference count
+        self.open_page = Page::default();
+        if let Some(page) = self.dirty.get_mut(&seq) {
+            debug!("{:?}: hit #{} (write)", self.name, seq);
+            page.update(off, buf);
+        } else if let Some(mut page) = self.ro_cache.pop(&seq) {
+            info!("{:?}: dirty #{}", self.name, seq);
+            page.update(off, buf);
+            self.dirty.insert(seq, page);
+        } else {
+            let mut page = if self.map[seq as usize].is_some() {
+                info!("{:?}: load #{} (write)", self.name, seq);
                 Page::load(&self.map, &self.backend, seq)?
             } else {
-                Vec::from(ZERO_CHUNK.as_ref()).into()
+                debug!("{:?}: zero #{} (write)", self.name, seq);
+                self.zero_page.clone().set_seq(seq)
             };
-            p[off..off + buf.len()].clone_from_slice(buf);
-            self.cache.insert(seq, p);
+            page.update(off, buf);
+            self.dirty.insert(seq, page);
         }
         Ok(buf.len())
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct FuseDirectory {
     pub basedir: PathBuf,
     revs: HashMap<u64, FuseAccess>,
 }
 
 impl FuseDirectory {
-    pub fn init<P: AsRef<Path>>(dir: P) -> Result<Self> {
+    pub fn init<P: AsRef<Path>>(dir: P, cache_size: usize) -> Result<Self> {
         let dir = dir.as_ref();
         let mut d = Self {
             basedir: dir.to_owned(),
@@ -365,7 +306,7 @@ impl FuseDirectory {
                     .ok_or_else(|| Error::InvalidName(p.to_owned()))?
                     .to_str()
                     .ok_or_else(|| Error::InvalidName(p.to_owned()))?;
-                let f = FuseAccess::new(&dir, rid)?;
+                let f = FuseAccess::new(&dir, rid, cache_size)?;
                 d.revs.insert(ino, f);
             }
         }
@@ -391,30 +332,14 @@ impl DerefMut for FuseDirectory {
     }
 }
 
-impl Drop for FuseDirectory {
-    fn drop(&mut self) {
-        let mut total = 0;
-        for (ino, a) in &self.revs {
-            let b = a.cache.len() as u64 * CHUNKSZ as u64;
-            debug!(
-                "{}: {}/{} pages ({} bytes) cached",
-                ino,
-                a.cache.len(),
-                pos2chunk(a.size),
-                b
-            );
-            total += b;
-        }
-        debug!("Total cache memory: {} bytes", total);
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::chunkvec::ChunkId;
-    use crate::CHUNKSZ_LOG;
-    use backend::MAGIC;
+    use crate::{chunk2pos, CHUNKSZ_LOG};
+    use backend::{RevId, MAGIC};
+
+    use chrono::{TimeZone, Utc};
     use maplit::hashmap;
     use serde::Serialize;
     use std::collections::HashMap;
@@ -422,7 +347,7 @@ mod test {
     use std::io::Write;
     use tempdir::TempDir;
 
-    const SZ: usize = CHUNKSZ as usize;
+    const SZ: usize = CHUNKSZ;
 
     // Identical to the one in chunkvec.rs, but without borrows
     #[derive(Debug, Default, Serialize)]
@@ -435,11 +360,11 @@ mod test {
         ChunkId::from_str(id)
     }
 
-    pub fn rid(id: &str) -> RevID {
-        RevID::from_str(id)
+    pub fn rid(id: &str) -> RevId {
+        RevId::from_str(id)
     }
 
-    pub fn store(spec: HashMap<RevID, Vec<Option<(ChunkId, Vec<u8>)>>>) -> TempDir {
+    pub fn store(spec: HashMap<RevId, Vec<Option<(ChunkId, Vec<u8>)>>>) -> TempDir {
         let td = TempDir::new("backy-store-test").expect("tempdir");
         let p = td.path();
         for (rev, chunks) in spec {
@@ -535,8 +460,6 @@ uuid: {rev}
         );
         // empty chunk -> zeroes
         assert_eq!(*fuse.read_at(chunk2pos(1), READ_SIZE)?, *vec![0; READ_SIZE]);
-        // nothing should have ended up in the CoW cache until now
-        assert!(fuse.cache.is_empty());
         // another chunk
         assert!(fuse.read_at(chunk2pos(0), READ_SIZE).is_ok());
         // read over page boundary -> short read
@@ -560,29 +483,19 @@ uuid: {rev}
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "cachingfq4bps3NVNEU49K")?;
-        assert!(fuse.current.is_empty());
-        assert!(fuse.seen_before.not_any());
-        // set current to 1, but does not load chunk into CoW
+        assert!(fuse.ro_cache.is_empty());
         fuse.read_at(chunk2pos(1), 1)?;
-        assert!(!fuse.current.is_empty());
-        assert_eq!(fuse.current.seq, 1);
-        assert!(fuse.cache.is_empty());
-        assert!(fuse.seen_before[1]);
-        // set current to 0, but does not load chunk into CoW
+        assert!(fuse.ro_cache.get(&1).is_some());
         fuse.read_at(chunk2pos(0), 1)?;
-        assert_eq!(fuse.current.seq, 0);
-        assert!(fuse.cache.is_empty());
-        assert!(fuse.seen_before[0]);
-        // second access to 1 loads chunk into CoW
+        assert_eq!(fuse.ro_cache.len(), 2);
+        assert!(fuse.ro_cache.get(&0).is_some());
         fuse.read_at(chunk2pos(1), 1)?;
-        assert_eq!(fuse.current.seq, 0);
-        assert!(fuse.cache.contains_key(&1));
-        // write access to 2 loads chunk right away into CoW
-        assert!(!fuse.cache.contains_key(&2));
+        assert_eq!(fuse.ro_cache.len(), 2);
         fuse.write_at(chunk2pos(2), &[1])?;
-        assert!(fuse.cache.contains_key(&2));
-        assert_eq!(fuse.current.seq, 0);
-        assert!(!fuse.seen_before[2]);
+        assert!(fuse.ro_cache.get(&2).is_none());
+        assert!(fuse.dirty.get(&2).is_some());
+        assert_eq!(fuse.dirty.len(), 1);
+        assert_eq!(fuse.ro_cache.len(), 2);
         Ok(())
     }
 
@@ -620,7 +533,7 @@ uuid: {rev}
             Some((cid("01fb50e6c86fae1679ef3351296fd671"), data))
         ]});
         let mut fuse = FuseAccess::load(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
-        assert!(fuse.cache.is_empty());
+        assert!(fuse.ro_cache.is_empty());
         // write at beginning boundary
         assert_eq!(fuse.write_at(0, &[0, 1, 2, 3])?, 4);
         assert_eq!(fuse.read_at(0, 5)?, &[0, 1, 2, 3, 10]);
@@ -653,7 +566,10 @@ uuid: {rev}
     fn write_cow_empty_page() -> Result<()> {
         let s = store(hashmap! {rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None]});
         let mut fuse = FuseAccess::load(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
+        assert!(fuse.ro_cache.get(&0).is_none());
         assert_eq!(fuse.write_at(2, &[1])?, 1);
+        assert!(fuse.ro_cache.get(&0).is_none());
+        assert_eq!(&fuse.dirty[&0].data[0..5], &[0, 0, 1, 0, 0]);
         assert_eq!(fuse.read_at(0, 5)?, &[0, 0, 1, 0, 0]);
         Ok(())
     }
@@ -687,7 +603,7 @@ uuid: {rev}
             .open(s.path().join("brokenhjMDZmMWQ5Y2JkMG"))?
             .set_len(30)?;
         // expected to succeed because map is not read at this step
-        let mut fuse = FuseAccess::new(s.path(), "brokenhjMDZmMWQ5Y2JkMG")?;
+        let mut fuse = FuseAccess::new(s.path(), "brokenhjMDZmMWQ5Y2JkMG", 0)?;
         match fuse.load_if_empty() {
             Err(e @ Error::ParseMap { .. }) => println!("expected Err: {}", e),
             res @ _ => panic!("Unexpected result: {:?}", res),
