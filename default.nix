@@ -19,7 +19,7 @@ let
 in
 rustPlatform.buildRustPackage rec {
   name = "backy-extract";
-  version = "1.0.0-dev";
+  version = "1.0.0";
 
   src = lib.cleanSourceWith {
     filter = n: t: (excludeTarget n t) && (lib.cleanSourceFilter n t);
@@ -40,7 +40,7 @@ rustPlatform.buildRustPackage rec {
     fi
   '';
 
-  cargoSha256 = "0kfqdhk4n2rfks36pflck79dv4r0x51hz3jny3kgdbbdnnymm3rz";
+  cargoSha256 = "1zzrvgdns1pmyxvr1csxqwjfqxhfxmwp9hirshkn0mx6g30mmd1r";
   cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
   checkType = "debug";
 
