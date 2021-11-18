@@ -42,14 +42,8 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct RevStats {
-    pub bytes_written: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct Rev {
     pub backend_type: String,
-    pub stats: RevStats,
     #[serde(deserialize_with = "timestamp_de")]
     pub timestamp: DateTime<Utc>,
     #[serde(deserialize_with = "revid_de")]

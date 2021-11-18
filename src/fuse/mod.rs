@@ -44,7 +44,7 @@ fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
     FileAttr {
         ino,
         size: entry.size,
-        blocks: (entry.rev.stats.bytes_written + 511) / 512,
+        blocks: (entry.size + 511) / 512,
         atime: timestamp,
         mtime: timestamp,
         ctime: timestamp,

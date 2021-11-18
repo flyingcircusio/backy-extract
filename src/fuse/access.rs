@@ -163,7 +163,7 @@ impl FuseAccess {
 
     #[cfg(test)]
     fn load<P: AsRef<Path>, I: AsRef<str>>(dir: P, id: I) -> Result<Self> {
-        let mut res = Self::new(dir, id, 64 << 20)?;
+        let mut res = Self::new(dir, id, 12 << 20)?;
         res.load_map()?;
         Ok(res)
     }
@@ -269,17 +269,24 @@ impl FuseAccess {
             page.update(off, buf);
             self.dirty.insert(seq, page);
         } else {
-            let mut page = if self.map[seq as usize].is_some() {
-                info!("{:?}: load #{} (write)", self.name, seq);
-                Page::load(&self.map, &self.backend, seq)?
-            } else {
-                debug!("{:?}: zero #{} (write)", self.name, seq);
-                self.zero_page.clone().set_seq(seq)
-            };
-            page.update(off, buf);
-            self.dirty.insert(seq, page);
+            self.alloc(seq, off, buf)?;
         }
         Ok(buf.len())
+    }
+
+    /// Creates a new page in the dirty cache either from disk or as empty page. Writes `buf` into
+    /// that page.
+    fn alloc(&mut self, seq: u32, off: usize, buf: &[u8]) -> Result<()> {
+        let mut page = if self.map[seq as usize].is_some() {
+            info!("{:?}: load #{} (write)", self.name, seq);
+            Page::load(&self.map, &self.backend, seq)?
+        } else {
+            debug!("{:?}: zero #{} (write)", self.name, seq);
+            self.zero_page.clone().set_seq(seq)
+        };
+        page.update(off, buf);
+        self.dirty.insert(seq, page);
+        Ok(())
     }
 }
 

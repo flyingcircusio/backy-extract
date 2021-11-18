@@ -19,8 +19,8 @@ use log::debug;
 use memmap::Mmap;
 use smallvec::{smallvec, SmallVec};
 use std::convert::TryFrom;
-use std::fs::{read_to_string, File};
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -78,7 +78,7 @@ impl Backend {
     /// valid version tag is present in the store directory.
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self> {
         let dir = dir.as_ref();
-        let s = read_to_string(dir.join("chunks/store")).map_err(|_| Error::NotFound)?;
+        let s = fs::read_to_string(dir.join("chunks/store")).map_err(|_| Error::NotFound)?;
         let version_tag = s.trim();
         if version_tag != "v2" {
             Err(Error::VersionTag(version_tag.to_owned()))
@@ -110,6 +110,20 @@ impl Backend {
             Ok(data)
         }
     }
+
+    pub fn save(&self, id: &str, buf: &[u8]) -> Result<()> {
+        if buf.len() != CHUNKSZ {
+            return Err(Error::Missized(buf.len()));
+        }
+        let dir = self.dir.join(format!("chunks/{}", &id[0..2]));
+        if fs::metadata(&dir).is_err() {
+            fs::create_dir(dir)?;
+        }
+        let mut f = File::create(self.filename(id))?;
+        f.write_all(&MAGIC)?;
+        f.write_all(&minilzo::compress(buf)?)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -118,7 +132,7 @@ mod tests {
     use crate::test_helper::*;
 
     use std::collections::hash_map::DefaultHasher;
-    use std::fs::{create_dir, metadata, set_permissions, write, OpenOptions};
+    use std::fs::{create_dir, metadata, read, set_permissions, write, OpenOptions};
     use std::hash::Hasher;
     use tempdir::TempDir;
 
@@ -147,6 +161,30 @@ mod tests {
         let mut h = DefaultHasher::new();
         h.write(&be.load("4db6e194fd398e8edb76e11054d73eb0")?);
         Ok(assert_eq!(h.finish(), 4783617329521481478))
+    }
+
+    #[test]
+    fn encode_chunk() {
+        let s = store_tar();
+        let be = Backend::open(s.path()).unwrap();
+        let buf = be.load("4db6e194fd398e8edb76e11054d73eb0").unwrap();
+        be.save("00000000000000000000000000000000", &buf).unwrap();
+        assert_eq!(
+            read(&format!(
+                "{}/chunks/{}/{}.chunk.lzo",
+                s.path().display(),
+                "4d",
+                "4db6e194fd398e8edb76e11054d73eb0"
+            ))
+            .unwrap(),
+            read(&format!(
+                "{}/chunks/{}/{}.chunk.lzo",
+                s.path().display(),
+                "00",
+                "00000000000000000000000000000000"
+            ))
+            .unwrap()
+        )
     }
 
     #[test]
