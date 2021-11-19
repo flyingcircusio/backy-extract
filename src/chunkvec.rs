@@ -2,39 +2,39 @@ use crate::backend::Backend;
 use crate::{pos2chunk, Chunk, Data, ExtractError, Result, CHUNKSZ};
 
 use crossbeam::channel::Sender;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use smallstr::SmallString;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::IntoIterator;
 
 pub type ChunkId = SmallString<[u8; 32]>;
+pub type Seq = SmallString<[u8; 7]>;
 
 // Format of the revision file as deserialized from JSON
-#[derive(Debug, Deserialize)]
-pub struct RevisionMap<'d> {
-    #[serde(borrow)]
-    mapping: HashMap<&'d str, &'d str>,
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct RevisionMap {
+    pub mapping: HashMap<Seq, ChunkId>,
     pub size: u64,
 }
 
-impl<'d> IntoIterator for RevisionMap<'d> {
+impl IntoIterator for RevisionMap {
     type Item = (u32, Option<ChunkId>);
-    type IntoIter = RevisionMapIterator<'d>;
+    type IntoIter = RevisionMapIterator;
 
-    fn into_iter(self) -> RevisionMapIterator<'d> {
+    fn into_iter(self) -> RevisionMapIterator {
         RevisionMapIterator::new(self)
     }
 }
 
-pub struct RevisionMapIterator<'d> {
-    map: HashMap<u32, &'d str>,
+pub struct RevisionMapIterator {
+    map: HashMap<u32, ChunkId>,
     i: u32,
     max: u32,
 }
 
-impl<'d> RevisionMapIterator<'d> {
-    fn new(map: RevisionMap<'d>) -> Self {
+impl RevisionMapIterator {
+    fn new(map: RevisionMap) -> Self {
         let max = pos2chunk(map.size);
         Self {
             map: map
@@ -48,14 +48,14 @@ impl<'d> RevisionMapIterator<'d> {
     }
 }
 
-impl<'d> Iterator for RevisionMapIterator<'d> {
+impl Iterator for RevisionMapIterator {
     type Item = (u32, Option<ChunkId>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.i;
         self.i += 1;
         if i < self.max {
-            let id: Option<ChunkId> = self.map.remove(&i).map(From::from);
+            let id: Option<ChunkId> = self.map.remove(&i);
             Some((i, id))
         } else {
             None
@@ -80,8 +80,8 @@ pub struct ChunkVec {
 
 impl ChunkVec {
     /// Parses backup spec JSON and constructs chunk map.
-    pub fn decode<'d>(input: &'d str) -> Result<Self> {
-        let rev: RevisionMap<'d> =
+    pub fn decode(input: &str) -> Result<Self> {
+        let rev: RevisionMap =
             serde_json::from_str(input).map_err(|e| ExtractError::DecodeMap(input.into(), e))?;
         let size = rev.size;
         if size % CHUNKSZ as u64 != 0 {

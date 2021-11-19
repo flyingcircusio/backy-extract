@@ -1,6 +1,6 @@
 [package]
 name = "backy-extract"
-version = "1.0.1-dev"
+version = "1.1.0-dev"
 authors = ["Christian Kauhaus <christian@kauhaus.de>"]
 edition = "2018"
 description = "Rapid restore tool for backy"
@@ -19,6 +19,7 @@ env_logger = "0.7"
 fnv = "1"
 fs2 = "0.4"
 fuse = { version = "0.3", optional = true }
+hex = { version = "0.4.3", optional = true }
 indicatif = "0.13"
 jemallocator = "0.3"
 lazy_static = "1.2"
@@ -27,12 +28,13 @@ log = "0.4"
 lru = "0.7"
 memmap = "0.7"
 minilzo = "0.2"
+murmur3 = { version = "0.5", optional = true }
 num_cpus = "1.9"
 rand = "0.7"
 serde_json = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.8"
-smallstr = "0.1"
+smallstr = { version = "0.2", features = ["serde"] }
 smallvec = "0.6"
 structopt = "0.3"
 thiserror = "1"
@@ -40,7 +42,7 @@ time = { version = "0.1", optional = true }
 
 [features]
 default = []
-fuse_driver = ["fuse", "time"]
+fuse_driver = ["fuse", "time", "murmur3", "hex"]
 
 [[bin]]
 name = "backy-fuse"

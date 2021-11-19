@@ -7,6 +7,7 @@ use crate::{pos2chunk, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
 use fnv::FnvHashMap as HashMap;
 use log::{debug, info};
 use lru::LruCache;
+use murmur3::murmur3_x64_128;
 use std::cmp::min;
 use std::ffi::OsString;
 use std::fmt;
@@ -73,6 +74,14 @@ impl Page {
             .into())
     }
 
+    #[cfg(test)]
+    fn new(data: Vec<u8>, seq: u32) -> Self {
+        Self {
+            data: Rc::new(data),
+            seq,
+        }
+    }
+
     /// Overwrites data region inside page. Panics if updated regions exceeds boundaries.
     ///
     /// The page gets copied before writing if other pages are around.
@@ -84,6 +93,14 @@ impl Page {
     fn set_seq(mut self, seq: u32) -> Self {
         self.seq = seq;
         self
+    }
+
+    fn hash(&self) -> ChunkId {
+        ChunkId::from(hex::encode(
+            murmur3_x64_128(&mut io::Cursor::new(self.data.as_ref()), 0)
+                .unwrap()
+                .to_le_bytes(),
+        ))
     }
 }
 
@@ -131,7 +148,7 @@ pub struct FuseAccess {
     backend: Backend,
     open_page: Page,
     zero_page: Page,
-    dirty: HashMap<u32, Page>,
+    dirty: LruCache<u32, Page>,
     ro_cache: LruCache<u32, Page>,
 }
 
@@ -156,7 +173,7 @@ impl FuseAccess {
             backend,
             open_page: Page::default(),
             zero_page: Page::from((Vec::from(ZERO_CHUNK.as_ref()), u32::MAX)),
-            dirty: HashMap::default(),
+            dirty: LruCache::new(cache_size >> CHUNKSZ_LOG),
             ro_cache: LruCache::new(cache_size >> CHUNKSZ_LOG),
         })
     }
@@ -267,7 +284,7 @@ impl FuseAccess {
         } else if let Some(mut page) = self.ro_cache.pop(&seq) {
             info!("{:?}: dirty #{}", self.name, seq);
             page.update(off, buf);
-            self.dirty.insert(seq, page);
+            self.dirty.put(seq, page);
         } else {
             self.alloc(seq, off, buf)?;
         }
@@ -285,7 +302,7 @@ impl FuseAccess {
             self.zero_page.clone().set_seq(seq)
         };
         page.update(off, buf);
-        self.dirty.insert(seq, page);
+        self.dirty.put(seq, page);
         Ok(())
     }
 }
@@ -343,25 +360,17 @@ impl DerefMut for FuseDirectory {
 mod test {
     use super::*;
     use crate::chunkvec::ChunkId;
+    use crate::test_helper::*;
     use crate::{chunk2pos, CHUNKSZ_LOG};
-    use backend::{RevId, MAGIC};
+    use backend::RevId;
 
     use chrono::{TimeZone, Utc};
     use maplit::hashmap;
-    use serde::Serialize;
     use std::collections::HashMap;
     use std::fs;
-    use std::io::Write;
     use tempdir::TempDir;
 
     const SZ: usize = CHUNKSZ;
-
-    // Identical to the one in chunkvec.rs, but without borrows
-    #[derive(Debug, Default, Serialize)]
-    struct RevisionMap {
-        mapping: HashMap<String, String>,
-        size: u64,
-    }
 
     pub fn cid(id: &str) -> ChunkId {
         ChunkId::from_str(id)
@@ -371,10 +380,10 @@ mod test {
         RevId::from_str(id)
     }
 
-    pub fn store(spec: HashMap<RevId, Vec<Option<(ChunkId, Vec<u8>)>>>) -> TempDir {
+    pub fn store(spec: HashMap<RevId, Vec<Option<Vec<u8>>>>) -> TempDir {
         let td = TempDir::new("backy-store-test").expect("tempdir");
         let p = td.path();
-        for (rev, chunks) in spec {
+        for (rev, data) in spec {
             fs::write(
                 p.join(&rev.as_str()).with_extension("rev"),
                 format!(
@@ -390,30 +399,25 @@ timestamp: 2019-11-14 14:21:18.289+00:00
 trust: trusted
 uuid: {rev}
 "#,
-                    written = chunk2pos(chunks.len() as u32),
-                    nchunks = chunks.len(),
+                    written = chunk2pos((data.len() + 1) as u32),
+                    nchunks = data.len(),
                     rev = rev.as_str()
                 ),
             )
             .expect("write .rev");
             let mut map = RevisionMap {
-                size: (chunks.len() << CHUNKSZ_LOG) as u64,
+                size: (data.len() << CHUNKSZ_LOG) as u64,
                 mapping: Default::default(),
             };
             fs::create_dir(p.join("chunks")).ok();
             fs::write(p.join("chunks/store"), "v2").unwrap();
-            for (i, chunk) in chunks.iter().enumerate() {
+            let be = Backend::open(&p).unwrap();
+            for (i, chunk) in data.into_iter().enumerate() {
                 if let Some(c) = chunk {
-                    let id = c.0.to_string();
-                    let file = p
-                        .join("chunks")
-                        .join(&id[0..2])
-                        .join(format!("{}.chunk.lzo", id));
-                    fs::create_dir_all(file.parent().unwrap()).ok();
-                    let mut f = fs::File::create(file).unwrap();
-                    f.write(&MAGIC).unwrap();
-                    f.write(&minilzo::compress(&c.1).unwrap()).unwrap();
-                    map.mapping.insert(i.to_string(), id);
+                    let c = Page::new(c, i as u32);
+                    let id = c.hash();
+                    be.save(&id, &c.data).unwrap();
+                    map.mapping.insert(i.to_string().into(), id);
                 }
             }
             let f = fs::File::create(p.join(rev.as_str())).unwrap();
@@ -437,15 +441,12 @@ uuid: {rev}
     #[test]
     fn init_map() -> Result<()> {
         let s = store(hashmap! {
-            rid("pqEKi7Jfq4bps3NVNEU49K") => vec![
-                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; SZ])),
-                None
-            ]
+            rid("pqEKi7Jfq4bps3NVNEU49K") => vec![Some(vec![1u8; SZ]), None],
         });
         let ra = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         assert_eq!(
             ra.map,
-            &[Some(cid("4355a46b19d348dc2f57c046f8ef63d4")), None]
+            &[Some(cid("ad92954d3d9926b51a07c64d0ee79f85")), None]
         );
         Ok(())
     }
@@ -453,11 +454,7 @@ uuid: {rev}
     #[test]
     fn read_data() -> Result<()> {
         let s = store(hashmap! {
-            rid("pqEKi7Jfq4bps3NVNEU49K") => vec![
-                Some((cid("4355a46b19d348dc2f57c046f8ef63d4"), vec![1u8; SZ])),
-                None,
-                Some((cid("1121cfccd5913f0a63fec40a6ffd44ea"), vec![3u8; SZ])),
-            ]
+            rid("pqEKi7Jfq4bps3NVNEU49K") => vec![Some(vec![1u8; SZ]), None, Some(vec![3u8; SZ])],
         });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         const READ_SIZE: usize = 1 << (CHUNKSZ_LOG - 4);
@@ -484,9 +481,9 @@ uuid: {rev}
     fn caching() -> Result<()> {
         let s = store(hashmap! {
             rid("cachingfq4bps3NVNEU49K") => vec![
-                Some((cid("6746af67f7734d0e9d248a520674f20b"), vec![0u8; SZ])),
-                Some((cid("7605119f98fc6d4630e1ed49e5f32a6d"), vec![1u8; SZ])),
-                Some((cid("854e1ff5d5300914e3e65a0cefdc4baf"), vec![2u8; SZ])),
+                Some(vec![0u8; SZ]),
+                Some(vec![1u8; SZ]),
+                Some(vec![2u8; SZ]),
             ]
         });
         let mut fuse = FuseAccess::load(s.path(), "cachingfq4bps3NVNEU49K")?;
@@ -519,10 +516,9 @@ uuid: {rev}
     fn read_offset() -> Result<()> {
         let mut data = vec![11u8; SZ];
         data[..10].clone_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let s = store(hashmap! {rid("MmE1MThjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("25d4f2a86deb5e2574bb3210b67bb24f"), vec![1u8; SZ])),
-            Some((cid("a1fb50e6c86fae1679ef3351296fd671"), data)),
-        ]});
+        let s = store(hashmap! {
+            rid("MmE1MThjMDZmMWQ5Y2JkMG") => vec![Some(vec![1u8; SZ]), Some(data)]
+        });
         let mut fuse = FuseAccess::load(s.path(), "MmE1MThjMDZmMWQ5Y2JkMG")?;
         assert_eq!(
             fuse.read_at(chunk2pos(1) + 4, 8)?,
@@ -535,10 +531,9 @@ uuid: {rev}
     fn write_cow() -> Result<()> {
         let mut data = vec![11u8; SZ];
         data[..10].clone_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let s = store(hashmap! {rid("XmE1MThjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("00d4f2a86deb5e2574bb3210b67bb24f"), vec![10u8; SZ])),
-            Some((cid("01fb50e6c86fae1679ef3351296fd671"), data))
-        ]});
+        let s = store(hashmap! {
+            rid("XmE1MThjMDZmMWQ5Y2JkMG") => vec![Some(vec![10u8; SZ]), Some(data)]
+        });
         let mut fuse = FuseAccess::load(s.path(), "XmE1MThjMDZmMWQ5Y2JkMG")?;
         assert!(fuse.ro_cache.is_empty());
         // write at beginning boundary
@@ -576,20 +571,20 @@ uuid: {rev}
         assert!(fuse.ro_cache.get(&0).is_none());
         assert_eq!(fuse.write_at(2, &[1])?, 1);
         assert!(fuse.ro_cache.get(&0).is_none());
-        assert_eq!(&fuse.dirty[&0].data[0..5], &[0, 0, 1, 0, 0]);
+        assert_eq!(&fuse.dirty.get(&0).unwrap().data[0..5], &[0, 0, 1, 0, 0]);
         assert_eq!(fuse.read_at(0, 5)?, &[0, 0, 1, 0, 0]);
         Ok(())
     }
 
     #[test]
     fn missing_chunk() -> Result<()> {
-        let s = store(hashmap! {rid("missingjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("7d0eae958fb3a9889774603cd049716b"), vec![1u8; SZ])),
-            Some((cid("95d2a0ce9869d4ec1395b7a7c8fae0c9"), vec![2u8; SZ])),
-        ]});
+        let s = store(hashmap! {
+            rid("missingjMDZmMWQ5Y2JkMG") => vec![Some(vec![1u8; SZ]), Some(vec![2u8; SZ])]
+        });
+        // std::thread::sleep(Duration::from_secs(1000));
         fs::remove_file(
             s.path()
-                .join("chunks/95/95d2a0ce9869d4ec1395b7a7c8fae0c9.chunk.lzo"),
+                .join("chunks/16/164570efa9d3d3354db15e99e2f6c781.chunk.lzo"),
         )?;
         let mut fuse = FuseAccess::load(s.path(), "missingjMDZmMWQ5Y2JkMG")?;
         assert_eq!(fuse.read_at(chunk2pos(0), 1)?, &[1]);
@@ -602,9 +597,7 @@ uuid: {rev}
 
     #[test]
     fn broken_map() -> Result<()> {
-        let s = store(hashmap! {rid("brokenhjMDZmMWQ5Y2JkMG") => vec![
-            Some((cid("6f9d15addefbbee6d9190df64706c58f"), vec![0u8; SZ])),
-        ]});
+        let s = store(hashmap! { rid("brokenhjMDZmMWQ5Y2JkMG") => vec![Some(vec![0u8; SZ])] });
         fs::OpenOptions::new()
             .write(true)
             .open(s.path().join("brokenhjMDZmMWQ5Y2JkMG"))?
@@ -616,5 +609,15 @@ uuid: {rev}
             res @ _ => panic!("Unexpected result: {:?}", res),
         }
         Ok(())
+    }
+
+    #[test]
+    /// Verify that the hash function produces the same hash value as found in the supplied
+    /// fixture.
+    fn hash_chunk() {
+        let s = store_tar();
+        let mut f = FuseAccess::load(s.path(), "VNzWKjnMqd6w58nzJwUZ98").unwrap();
+        let p = f.read(0).unwrap();
+        assert_eq!(p.hash(), "4db6e194fd398e8edb76e11054d73eb0");
     }
 }

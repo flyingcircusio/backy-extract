@@ -62,7 +62,7 @@ checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
 name = "backy-extract"
-version = "1.0.1-dev"
+version = "1.1.0-dev"
 dependencies = [
  "anyhow",
  "atty",
@@ -76,6 +76,7 @@ dependencies = [
  "fnv",
  "fs2",
  "fuse",
+ "hex",
  "indicatif",
  "jemallocator",
  "lazy_static",
@@ -85,6 +86,7 @@ dependencies = [
  "maplit",
  "memmap",
  "minilzo",
+ "murmur3",
  "num_cpus",
  "rand 0.7.3",
  "serde",
@@ -92,7 +94,7 @@ dependencies = [
  "serde_yaml",
  "shells",
  "smallstr",
- "smallvec",
+ "smallvec 0.6.14",
  "structopt",
  "tar",
  "tempdir",
@@ -411,6 +413,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "humantime"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,6 +586,12 @@ dependencies = [
  "adler",
  "autocfg",
 ]
+
+[[package]]
+name = "murmur3"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ead5388e485d38e622630c6b05afd3761a6701ff15c55b279ea5b31dcb62cff"
 
 [[package]]
 name = "num-integer"
@@ -856,11 +870,12 @@ checksum = "5d293d1d5246e244c4ff268aee246f18f42c817bee61f10a951093fdb9518528"
 
 [[package]]
 name = "smallstr"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa65bb4d5b2bbc90d36af64e29802f788aa614783fa1d0df011800ddcec6e8e"
+checksum = "1e922794d168678729ffc7e07182721a14219c65814e66e91b839a272fe5ae4f"
 dependencies = [
- "smallvec",
+ "serde",
+ "smallvec 1.7.0",
 ]
 
 [[package]]
@@ -871,6 +886,12 @@ checksum = "b97fcaeba89edba30f044a10c6a3cc39df9c3f17d7cd829dd1446cab35f890e0"
 dependencies = [
  "maybe-uninit",
 ]
+
+[[package]]
+name = "smallvec"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ecab6c735a6bb4139c0caafd0cc3635748bbb3acf4550e8138122099251f309"
 
 [[package]]
 name = "strsim"
