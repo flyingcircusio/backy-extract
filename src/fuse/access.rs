@@ -102,6 +102,12 @@ impl Page {
                 .to_le_bytes(),
         ))
     }
+
+    fn save(&self, be: &Backend) -> Result<ChunkId> {
+        let id = self.hash();
+        be.save(&id, &self.data)?;
+        Ok(id)
+    }
 }
 
 impl From<(Vec<u8>, u32)> for Page {
@@ -173,8 +179,8 @@ impl FuseAccess {
             backend,
             open_page: Page::default(),
             zero_page: Page::from((Vec::from(ZERO_CHUNK.as_ref()), u32::MAX)),
-            dirty: LruCache::new(cache_size >> CHUNKSZ_LOG),
-            ro_cache: LruCache::new(cache_size >> CHUNKSZ_LOG),
+            dirty: LruCache::new((cache_size >> CHUNKSZ_LOG) + 1),
+            ro_cache: LruCache::new((cache_size >> CHUNKSZ_LOG) + 1),
         })
     }
 
@@ -275,6 +281,18 @@ impl FuseAccess {
         self.write(seq, off as usize, buf)
     }
 
+    /// Pushes pages from the dirty cache to disk if the latter becomes too full.
+    fn writeback(&mut self) -> Result<()> {
+        while self.dirty.len() + 1 >= self.dirty.cap() {
+            let (seq, page) = self.dirty.pop_lru().unwrap();
+            debug!("{:?}: writeback #{}", self.name, seq);
+            let id = page.save(&self.backend)?;
+            self.map[seq as usize] = Some(id);
+        }
+        Ok(())
+    }
+
+    /// Updates data in the dirty cache.
     fn write(&mut self, seq: u32, off: usize, buf: &[u8]) -> Result<usize> {
         // resets reference count
         self.open_page = Page::default();
@@ -283,6 +301,7 @@ impl FuseAccess {
             page.update(off, buf);
         } else if let Some(mut page) = self.ro_cache.pop(&seq) {
             info!("{:?}: dirty #{}", self.name, seq);
+            self.writeback()?;
             page.update(off, buf);
             self.dirty.put(seq, page);
         } else {
@@ -294,6 +313,7 @@ impl FuseAccess {
     /// Creates a new page in the dirty cache either from disk or as empty page. Writes `buf` into
     /// that page.
     fn alloc(&mut self, seq: u32, off: usize, buf: &[u8]) -> Result<()> {
+        self.writeback()?;
         let mut page = if self.map[seq as usize].is_some() {
             info!("{:?}: load #{} (write)", self.name, seq);
             Page::load(&self.map, &self.backend, seq)?
@@ -414,9 +434,7 @@ uuid: {rev}
             let be = Backend::open(&p).unwrap();
             for (i, chunk) in data.into_iter().enumerate() {
                 if let Some(c) = chunk {
-                    let c = Page::new(c, i as u32);
-                    let id = c.hash();
-                    be.save(&id, &c.data).unwrap();
+                    let id = Page::new(c, i as u32).save(&be).unwrap();
                     map.mapping.insert(i.to_string().into(), id);
                 }
             }
@@ -428,7 +446,7 @@ uuid: {rev}
 
     #[test]
     fn initialize_rev() -> Result<()> {
-        let s = store(hashmap! {rid("pqEKi7Jfq4bps3NVNEU49K") => vec![]});
+        let s = store(hashmap! { rid("pqEKi7Jfq4bps3NVNEU49K") => vec![] });
         let rev = Rev::load(s.path(), "pqEKi7Jfq4bps3NVNEU49K")?;
         assert_eq!(
             rev.timestamp,
@@ -505,7 +523,7 @@ uuid: {rev}
 
     #[test]
     fn all_zero_chunks() -> Result<()> {
-        let s = store(hashmap! {rid("pqEKi7Jfq4bps3NVNEU400") => vec![None, None] });
+        let s = store(hashmap! { rid("pqEKi7Jfq4bps3NVNEU400") => vec![None, None] });
         let mut fuse = FuseAccess::load(s.path(), "pqEKi7Jfq4bps3NVNEU400")?;
         assert_eq!(*fuse.read_at(chunk2pos(0), SZ)?, *vec![0; SZ]);
         assert_eq!(*fuse.read_at(chunk2pos(1), SZ)?, *vec![0; SZ]);
@@ -566,7 +584,7 @@ uuid: {rev}
 
     #[test]
     fn write_cow_empty_page() -> Result<()> {
-        let s = store(hashmap! {rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None]});
+        let s = store(hashmap! { rid("YmE1MThjMDZmMWQ5Y2JkMG") => vec![None] });
         let mut fuse = FuseAccess::load(s.path(), "YmE1MThjMDZmMWQ5Y2JkMG")?;
         assert!(fuse.ro_cache.get(&0).is_none());
         assert_eq!(fuse.write_at(2, &[1])?, 1);

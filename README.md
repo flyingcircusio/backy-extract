@@ -50,21 +50,27 @@ userspace). This allows to mount backup images and retrieve single files.
 Usage
 -----
 
-1. Start `backy-fuse` to mount a backup via FUSE:
+1. Start `backy-fuse` to access all backups of a given VM via FUSE:
    `backy-fuse -d /srv/backy/vm /mnt/backy-fuse`
-2. Pick a revision and create loop device:
-   `losetup -f -P --show /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7`
-3. Create loop mount:
-   `mount -oro /dev/loop0p1 /mnt/restore`
+2. Mount the image of interest:
+   `mount -o ro,loop /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7 /mnt/restore`
 
 When finished, the above stops must be reversed:
 
 1. Unmount loop device:
    `umount /mnt/restore`
-2. Unregister loop device:
-   `losetup -d /dev/loop0`
-3. Finish FUSE:
+2. Finish FUSE:
    `fusermount -u /mnt/backy-fuse`
+
+Caching
+-------
+
+`backy-fuse` maintains two caches: A read-only cache to speed up read operations
+and a dirty cache to store pages which have been written to. Both caches have
+the same size, which may be specified with the `-c` flag. Note that chunk will
+spill into the backy directory if the dirty cache gets too full. This is
+generally not a problem because the next `backy purge` run will clean it up.
+However, it is strongly recommended to mount FUSE volumes with the **ro** flag.
 
 Compiling
 ---------

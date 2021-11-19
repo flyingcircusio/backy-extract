@@ -59,7 +59,6 @@ fn decompress(f: File) -> Result<Vec<u8>> {
     if buf[0..5] != MAGIC[..] {
         Err(Error::Magic)
     } else {
-        debug!("decompressing {} bytes", buf.len() - 5);
         Ok(minilzo::decompress(&buf[5..], CHUNKSZ).map_err(Error::Lzo)?)
     }
 }
@@ -111,6 +110,7 @@ impl Backend {
         }
     }
 
+    #[allow(unused)]
     pub fn save(&self, id: &str, buf: &[u8]) -> Result<()> {
         if buf.len() != CHUNKSZ {
             return Err(Error::Missized(buf.len()));
@@ -120,6 +120,7 @@ impl Backend {
             fs::create_dir(dir)?;
         }
         let mut f = File::create(self.filename(id))?;
+        debug!("write lzo to {:?}", f);
         f.write_all(&MAGIC)?;
         f.write_all(&minilzo::compress(buf)?)?;
         Ok(())

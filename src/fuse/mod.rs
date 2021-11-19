@@ -6,7 +6,7 @@ use crate::purgelock;
 use anyhow::{Context, Result};
 use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyWrite, Request, FUSE_ROOT_ID,
+    ReplyOpen, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
 use log::{error, info, warn};
@@ -251,6 +251,27 @@ impl Filesystem for BackyFs {
             re.error(ENOENT);
         }
     }
+
+    fn statfs(&mut self, _r: &Request, _ino: u64, re: ReplyStatfs) {
+        let total: u64 = self
+            .dir
+            .values_mut()
+            .map(|fa| {
+                fa.load_if_empty().ok();
+                fa.size
+            })
+            .sum();
+        re.statfs(
+            (total + 4095) / 4096,     // blocks
+            0,                         // bfree
+            0,                         // bavail
+            self.dir.len() as u64 + 2, // files
+            0,                         // ffree
+            4096,                      // bsize
+            1024,                      // namelen
+            4096,                      // fragment size
+        )
+    }
 }
 
 #[derive(Debug, Default, StructOpt)]
@@ -275,8 +296,8 @@ pub struct App {
         default_value = "allow_root"
     )]
     pub mountopts: Vec<String>,
-    /// Size of the read-only chunk cache in MiB
-    #[structopt(short, long, value_name = "SIZE", default_value = "256")]
+    /// Size of the chunk caches in MiB
+    #[structopt(short, long, value_name = "SIZE", default_value = "1024")]
     pub cache: usize,
     #[structopt(name = "MOUNTPOINT")]
     /// Where to mount the FUSE filesystem [example: /mnt/backy-fuse]
