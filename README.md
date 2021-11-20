@@ -52,7 +52,7 @@ Usage
 
 1. Start `backy-fuse` to access all backups of a given VM via FUSE:
    `backy-fuse -d /srv/backy/vm /mnt/backy-fuse`
-2. Mount the image of interest:
+2. Mount the revision of interest:
    `mount -o ro,loop /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7 /mnt/restore`
 
 When finished, the above stops must be reversed:
@@ -61,6 +61,15 @@ When finished, the above stops must be reversed:
    `umount /mnt/restore`
 2. Finish FUSE:
    `fusermount -u /mnt/backy-fuse`
+
+Note that in case the image contains a partition table, the loop device must be
+set up explicitly using for example:
+`losetup -f -P --show /mnt/backy-fuse/tAGKE5rrxReggVMtoPSr7`
+
+*lostup* will create subdevices for each partition, e.g. `/dev/loop0p1`.
+
+Don't forget to remove the manually created loop devices with `losetup -D` after
+use.
 
 Caching
 -------
@@ -71,6 +80,12 @@ the same size, which may be specified with the `-c` flag. Note that chunk will
 spill into the backy directory if the dirty cache gets too full. This is
 generally not a problem because the next `backy purge` run will clean it up.
 However, it is strongly recommended to mount FUSE volumes with the **ro** flag.
+
+Debugging
+---------
+
+Set `RUST_LOG=info` or even `RUST_LOG=debug` in the environment for FUSE
+protocol diagnostics.
 
 Compiling
 ---------

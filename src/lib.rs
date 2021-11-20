@@ -55,7 +55,7 @@ pub enum ExtractError {
     #[error("Chunked backend error")]
     Backend(#[from] backend::Error),
     #[error("IPC error")]
-    SendChunk(#[from] crossbeam::SendError<Chunk>),
+    SendChunk(#[from] crossbeam::channel::SendError<Chunk>),
     #[error("Write error")]
     WriteError(#[from] writeout::Error),
 }

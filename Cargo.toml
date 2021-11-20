@@ -14,7 +14,7 @@ byteorder = "1.2"
 chrono = "0.4"
 clap = { version = "2.32", features = ["wrap_help"] }
 console = "0.14"
-crossbeam = "0.7"
+crossbeam = "0.8"
 env_logger = "0.7"
 fnv = "1"
 fs2 = "0.4"

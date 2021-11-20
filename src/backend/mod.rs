@@ -8,8 +8,8 @@ mod rev;
 #[cfg(feature = "fuse_driver")]
 pub use rev::{Error as RevError, Rev, RevId};
 
+#[cfg(os = "linux")]
 mod fadvise;
-use fadvise::{fadvise, POSIX_FADV_DONTNEED};
 
 use crate::CHUNKSZ;
 
@@ -51,15 +51,14 @@ lazy_static! {
     };
 }
 
-fn decompress(f: File) -> Result<Vec<u8>> {
+fn decompress(f: &File) -> Result<Vec<u8>> {
     debug!("read lzo from {:?}", f);
-    fadvise(&f, POSIX_FADV_DONTNEED);
-    let buf = unsafe { Mmap::map(&f)? };
+    let buf = unsafe { Mmap::map(f)? };
     // first 5 bytes contain header
     if buf[0..5] != MAGIC[..] {
         Err(Error::Magic)
     } else {
-        Ok(minilzo::decompress(&buf[5..], CHUNKSZ).map_err(Error::Lzo)?)
+        Ok(minilzo::decompress(&buf[5..], CHUNKSZ)?)
     }
 }
 
@@ -102,7 +101,11 @@ impl Backend {
     ///
     /// Fails with Error::Missized if decompressed data does not fix exactly into a chunk.
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
-        let data = decompress(File::open(self.filename(id))?)?;
+        let f = File::open(self.filename(id))?;
+        let data = decompress(&f)?;
+        #[cfg(os = "linux")]
+        fadvise::dontneed(f);
+
         if data.len() != CHUNKSZ {
             Err(Error::Missized(data.len()))
         } else {
