@@ -2,7 +2,6 @@ use super::{Error, Result, WriteOut, WriteOutBuilder};
 use crate::{chunk2pos, pos2chunk, Chunk, Data, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
 
 use crossbeam::channel::{Receiver, Sender};
-use crossbeam::thread;
 use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand::rngs::ThreadRng;
@@ -104,7 +103,7 @@ impl RandomWriteOut {
         f: &File,
         rx: &Receiver<Chunk>,
         prog: &Sender<usize>,
-        writer: &(dyn Writer + Send + Sync),
+        writer: &(dyn Writer),
     ) -> Result<()> {
         rx.into_iter().try_for_each(|chunk| -> Result<()> {
             match chunk.data {
@@ -134,21 +133,12 @@ impl WriteOut for RandomWriteOut {
         let (f, guess) = self
             .open()
             .map_err(|e| Error::OutputFile(self.path.to_owned(), e))?;
-        let writer: Box<dyn Writer + Send + Sync> = if self.sparse.unwrap_or(guess) {
+        let writer: Box<dyn Writer> = if self.sparse.unwrap_or(guess) {
             Box::new(Sparse)
         } else {
             Box::new(Continuous)
         };
-        thread::scope(|s| {
-            let handles: Vec<_> = (0..self.threads)
-                .map(|_| s.spawn(|_| self.run(&f, &chunks, &progress, &*writer)))
-                .collect();
-            handles
-                .into_iter()
-                .try_for_each(|hdl| -> Result<()> { hdl.join().expect("thread panic") })
-        })
-        .expect("subthread panic")?;
-        Ok(())
+        self.run(&f, &chunks, &progress, &*writer)
     }
 
     fn name(&self) -> String {

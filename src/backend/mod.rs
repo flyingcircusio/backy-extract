@@ -16,11 +16,10 @@ use crate::CHUNKSZ;
 use byteorder::{BigEndian, WriteBytesExt};
 use lazy_static::lazy_static;
 use log::debug;
-use memmap::Mmap;
 use smallvec::{smallvec, SmallVec};
 use std::convert::TryFrom;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -51,9 +50,10 @@ lazy_static! {
     };
 }
 
-fn decompress(f: &File) -> Result<Vec<u8>> {
+fn decompress(f: &mut File) -> Result<Vec<u8>> {
     debug!("read lzo from {:?}", f);
-    let buf = unsafe { Mmap::map(f)? };
+    let mut buf = Vec::with_capacity(f.metadata()?.len() as usize);
+    f.read_to_end(&mut buf)?;
     // first 5 bytes contain header
     if buf[0..5] != MAGIC[..] {
         Err(Error::Magic)
@@ -101,8 +101,8 @@ impl Backend {
     ///
     /// Fails with Error::Missized if decompressed data does not fix exactly into a chunk.
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
-        let f = File::open(self.filename(id))?;
-        let data = decompress(&f)?;
+        let mut f = File::open(self.filename(id))?;
+        let data = decompress(&mut f)?;
         #[cfg(os = "linux")]
         fadvise::dontneed(f);
 
@@ -126,6 +126,8 @@ impl Backend {
         debug!("write lzo to {:?}", f);
         f.write_all(&MAGIC)?;
         f.write_all(&minilzo::compress(buf)?)?;
+        #[cfg(os = "linux")]
+        fadvise::dontneed(f);
         Ok(())
     }
 }

@@ -21,7 +21,6 @@ use crossbeam::channel::{bounded, unbounded, Receiver};
 use crossbeam::thread;
 use fs2::FileExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
-use jemallocator::Jemalloc;
 use lazy_static::lazy_static;
 use memmap::MmapMut;
 use smallvec::SmallVec;
@@ -30,9 +29,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
-
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Error, Debug)]
 pub enum ExtractError {
@@ -159,7 +155,7 @@ impl Extractor {
     }
 
     fn default_threads() -> u8 {
-        (num_cpus::get() / 2).max(1).min(60) as u8
+        num_cpus::get().max(2).min(24) as u8
     }
 
     /// Enables/disables a nice progress bar on stderr while restoring.
@@ -238,7 +234,7 @@ impl Extractor {
         let writer = w.build(chunks.size, self.threads);
         let name = writer.name();
 
-        let (chunk_tx, chunk_rx) = bounded(self.threads as usize);
+        let (chunk_tx, chunk_rx) = bounded(2 * self.threads as usize);
         let total_bytes = thread::scope(|s| -> Result<u64> {
             let mut hdl = vec![s.spawn(|_| writer.receive(chunk_rx, progress).map_err(Into::into))];
             for threadid in 0..self.threads {
