@@ -1,3 +1,10 @@
+2021-12-08  Christian Kauhaus <christian@kauhaus.de>
+
+	* Release backy-extract 1.1.0
+	* Write dirty cache back to the store if it becomes to large.
+	* Add `-c`/`--cache` option to specify both read-only and dirty cache
+	  size.
+
 2021-05-19  Christian Kauhaus <christian@kauhaus.de>
 
 	* Release backy-extract 1.0.0

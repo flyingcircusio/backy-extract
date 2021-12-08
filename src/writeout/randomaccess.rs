@@ -111,14 +111,14 @@ impl RandomWriteOut {
                 Data::Some(ref data) => {
                     for seq in &chunk.seqs {
                         writer
-                            .data(&f, *seq, data)
+                            .data(f, *seq, data)
                             .map_err(|e| Error::WriteChunkFile(*seq, self.path.to_owned(), e))?;
                     }
                 }
                 Data::Zero => {
                     for seq in &chunk.seqs {
                         writer
-                            .zero(&f, *seq)
+                            .zero(f, *seq)
                             .map_err(|e| Error::WriteChunkFile(*seq, self.path.to_owned(), e))?;
                     }
                 }

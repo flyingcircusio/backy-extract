@@ -42,6 +42,11 @@ OPTIONS
     normally unable to access FUSE filesystems. See **fuse(8)** for a list of
     allowed options.
 
+**-c** *NUM*, **--cache** *NUM*
+    Cache size in MiB. backy-fuse creates two caches of the same size, one as
+    read-only cache and the other as dirty cache. So specifying 512 MiB means
+    that up to 1 GiB can be used.
+
 **-V**, **--version**
     Show version.
 
@@ -82,8 +87,8 @@ FILES
     that setting is not available.
 
 
-EXAMPLE
-=======
+EXAMPLES
+========
 
 1. Explore revisions
 --------------------
@@ -142,9 +147,15 @@ NOTES
 =====
 
 backy-fuse employs a two-tier cache scheme. Chunks are kept in a fixed-size read
-only cache (256 MiB large by default). In case backup images are written to,
-dirty pages are copied into an unbounded page cache which is kept in memory as
-long as backy-fuse is running. So avoid read-write mounts of backup images.
+only cache (512 MiB large by default). In case backup images are written to,
+dirty pages are kept in an equally sized read-write cache.  If the dirty cache
+grows largen than its allowed size, pages are written back to the backy store. A
+subsequent `backy purge` run will clean it up.
+
+Although technically possible, mounting backy-fuse images in read-write mode is
+strongly recommended against. Use read-only mounts whereever possible.
+Read-write access may be necessecary to replay journals in case of filesystem
+corruption, though.
 
 
 SEE ALSO
