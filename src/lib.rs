@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -186,12 +186,15 @@ impl Extractor {
         self.progress
             .println(format!("{} Restoring to {}", step(3), style(name).yellow()));
         self.progress.set_length(total_size);
-        self.progress
-            .set_style(ProgressStyle::default_bar().template(
-                "{bytes:>9.yellow}/{total_bytes:.green} {bar:52.cyan/blue} ({elapsed}/{eta})",
-            ));
-        self.progress.inc(0);
-        self.progress.set_draw_delta(total_size / 1000);
+        self.progress.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{bytes:>9.yellow}/{total_bytes:.green} {bar:52.cyan/blue} ({elapsed}/{eta})",
+                )
+                .unwrap(),
+        );
+        self.progress.tick();
+        self.progress.enable_steady_tick(Duration::from_secs(1));
         let mut total = 0;
         for bytes in written {
             let bytes = bytes as u64;
