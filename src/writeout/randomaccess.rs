@@ -39,12 +39,11 @@ impl RandomAccess {
 impl WriteOutBuilder for RandomAccess {
     type Impl = RandomWriteOut;
 
-    fn build(self, size: u64, threads: u8) -> Self::Impl {
+    fn build(self, size: u64) -> Self::Impl {
         RandomWriteOut {
             path: self.path,
             sparse: self.sparse,
             size,
-            threads,
         }
     }
 }
@@ -54,7 +53,6 @@ pub struct RandomWriteOut {
     path: PathBuf,
     sparse: Option<bool>,
     size: u64,
-    threads: u8,
 }
 
 impl RandomWriteOut {

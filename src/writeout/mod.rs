@@ -32,7 +32,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 /// invoking `build` to get the final WriteOut object.
 pub trait WriteOutBuilder {
     type Impl: WriteOut + Sync + Send;
-    fn build(self, total_size: u64, threads: u8) -> Self::Impl;
+    fn build(self, total_size: u64) -> Self::Impl;
 }
 
 /// Abstract writeout (restore) plugin.

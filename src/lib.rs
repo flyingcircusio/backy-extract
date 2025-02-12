@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -101,7 +101,7 @@ pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
         .write(true)
         .create(false)
         .open(basedir.join(".purge"))?;
-    f.try_lock_shared()?;
+    FileExt::try_lock_shared(&f)?;
     Ok(f)
 }
 
@@ -119,7 +119,7 @@ pub struct Extractor {
     revision: String,
     threads: u8,
     basedir: PathBuf,
-    lock: File,
+    _lock: File,
     progress: ProgressBar,
 }
 
@@ -141,7 +141,7 @@ impl Extractor {
             revision,
             threads: Self::default_threads(),
             basedir,
-            lock,
+            _lock: lock,
             progress: ProgressBar::hidden(),
         })
     }
@@ -186,12 +186,15 @@ impl Extractor {
         self.progress
             .println(format!("{} Restoring to {}", step(3), style(name).yellow()));
         self.progress.set_length(total_size);
-        self.progress
-            .set_style(ProgressStyle::default_bar().template(
-                "{bytes:>9.yellow}/{total_bytes:.green} {bar:52.cyan/blue} ({elapsed}/{eta})",
-            ));
-        self.progress.inc(0);
-        self.progress.set_draw_delta(total_size / 1000);
+        self.progress.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{bytes:>9.yellow}/{total_bytes:.green} {bar:52.cyan/blue} ({elapsed}/{eta})",
+                )
+                .unwrap(),
+        );
+        self.progress.tick();
+        self.progress.enable_steady_tick(Duration::from_secs(1));
         let mut total = 0;
         for bytes in written {
             let bytes = bytes as u64;
@@ -231,7 +234,7 @@ impl Extractor {
 
         self.print_decompress(chunks.len());
         let (progress, progress_rx) = unbounded();
-        let writer = w.build(chunks.size, self.threads);
+        let writer = w.build(chunks.size);
         let name = writer.name();
 
         let (chunk_tx, chunk_rx) = bounded(2 * self.threads as usize);
