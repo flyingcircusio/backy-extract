@@ -20,7 +20,7 @@ impl<W: Write + Send + Sync> WriteOutBuilder for Stream<W> {
     type Impl = Stream<W>;
 
     // Does not really do anything except fulfilling the trait requirement.
-    fn build(self, _size: u64, _threads: u8) -> Self::Impl {
+    fn build(self, _size: u64) -> Self::Impl {
         self
     }
 }

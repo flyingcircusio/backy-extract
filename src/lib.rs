@@ -101,7 +101,7 @@ pub fn purgelock(basedir: &Path) -> Result<File, io::Error> {
         .write(true)
         .create(false)
         .open(basedir.join(".purge"))?;
-    f.try_lock_shared()?;
+    FileExt::try_lock_shared(&f)?;
     Ok(f)
 }
 
@@ -119,7 +119,7 @@ pub struct Extractor {
     revision: String,
     threads: u8,
     basedir: PathBuf,
-    lock: File,
+    _lock: File,
     progress: ProgressBar,
 }
 
@@ -141,7 +141,7 @@ impl Extractor {
             revision,
             threads: Self::default_threads(),
             basedir,
-            lock,
+            _lock: lock,
             progress: ProgressBar::hidden(),
         })
     }
@@ -234,7 +234,7 @@ impl Extractor {
 
         self.print_decompress(chunks.len());
         let (progress, progress_rx) = unbounded();
-        let writer = w.build(chunks.size, self.threads);
+        let writer = w.build(chunks.size);
         let name = writer.name();
 
         let (chunk_tx, chunk_rx) = bounded(2 * self.threads as usize);

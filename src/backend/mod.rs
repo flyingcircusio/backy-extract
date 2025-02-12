@@ -8,7 +8,6 @@ mod rev;
 #[cfg(feature = "fuse_driver")]
 pub use rev::{Error as RevError, Rev, RevId};
 
-#[cfg(os = "linux")]
 mod fadvise;
 
 use crate::CHUNKSZ;
@@ -103,7 +102,6 @@ impl Backend {
     pub fn load(&self, id: &str) -> Result<Vec<u8>> {
         let mut f = File::open(self.filename(id))?;
         let data = decompress(&mut f)?;
-        #[cfg(os = "linux")]
         fadvise::dontneed(f);
 
         if data.len() != CHUNKSZ {
@@ -126,7 +124,6 @@ impl Backend {
         debug!("write lzo to {:?}", f);
         f.write_all(&MAGIC)?;
         f.write_all(&minilzo::compress(buf)?)?;
-        #[cfg(os = "linux")]
         fadvise::dontneed(f);
         Ok(())
     }
