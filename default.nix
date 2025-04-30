@@ -40,7 +40,7 @@ rustPlatform.buildRustPackage rec {
     fi
   '';
 
-  cargoHash = "sha256-fbm0jYQWb7WG/yMH4OCNMMc2EXuH2KG+7vUa/jDwUjU=";
+  cargoHash = "sha256-vf3AYpP7nM/lmzrOgFI31Obox4d0+bbiPvlOHyDQEEs=";
   cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
   checkType = "debug";
 
