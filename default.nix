@@ -1,20 +1,24 @@
-{ system ? builtins.system
-, pkgs ? import <nixpkgs> {}
-, stdenv ? pkgs.stdenv
-, lib ? pkgs.lib
-, docutils ? pkgs.docutils
-, fuse ? pkgs.fuse
-, jq ? pkgs.jq
-, lzo ? pkgs.lzo
-, pkgconfig ? pkgs.pkgconfig
-, rustPlatform ? pkgs.rustPlatform
-, Security ? pkgs.darwin.apple_sdk.frameworks.Security
+{
+  system ? builtins.system,
+  pkgs ? import <nixpkgs> { },
+  stdenv ? pkgs.stdenv,
+  lib ? pkgs.lib,
+  docutils ? pkgs.docutils,
+  fuse ? pkgs.fuse,
+  jq ? pkgs.jq,
+  lzo ? pkgs.lzo,
+  pkgconfig ? pkgs.pkg-config,
+  rustPlatform ? pkgs.rustPlatform,
+  Security ? pkgs.darwin.apple_sdk.frameworks.Security,
 }:
 
 let
   excludeTarget =
-    name: type: let baseName = baseNameOf (toString name); in ! (
-      baseName == "target" && type == "directory");
+    name: type:
+    let
+      baseName = baseNameOf (toString name);
+    in
+    !(baseName == "target" && type == "directory");
 
 in
 rustPlatform.buildRustPackage rec {
@@ -26,12 +30,15 @@ rustPlatform.buildRustPackage rec {
     src = ./.;
   };
 
-  nativeBuildInputs = [ docutils jq pkgconfig ];
+  nativeBuildInputs = [
+    docutils
+    jq
+    pkgconfig
+  ];
 
-  buildInputs =
-    [ lzo ] ++
-    (lib.optionals stdenv.isDarwin [ Security ]) ++
-    (lib.optionals stdenv.isLinux [ fuse ]);
+  buildInputs = [
+    lzo
+  ];
 
   preConfigure = ''
     if ! cargo read-manifest | jq .version -r | grep -q $version; then
@@ -40,7 +47,7 @@ rustPlatform.buildRustPackage rec {
     fi
   '';
 
-  cargoHash = "sha256-vf3AYpP7nM/lmzrOgFI31Obox4d0+bbiPvlOHyDQEEs=";
+  cargoHash = "sha256-/SkFm/Kq8dRszloJC3ZAEYfpF32uc5CWfpGl1u3tBFA=";
   cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
   checkType = "debug";
 
