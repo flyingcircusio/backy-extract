@@ -1,15 +1,12 @@
 {
-  system ? builtins.system,
   pkgs ? import <nixpkgs> { },
-  stdenv ? pkgs.stdenv,
   lib ? pkgs.lib,
   docutils ? pkgs.docutils,
-  fuse ? pkgs.fuse,
   jq ? pkgs.jq,
   lzo ? pkgs.lzo,
   pkgconfig ? pkgs.pkg-config,
   rustPlatform ? pkgs.rustPlatform,
-  Security ? pkgs.darwin.apple_sdk.frameworks.Security,
+  stdenv ? pkgs.stdenv,
 }:
 
 let
@@ -48,7 +45,7 @@ rustPlatform.buildRustPackage rec {
   '';
 
   cargoHash = "sha256-/SkFm/Kq8dRszloJC3ZAEYfpF32uc5CWfpGl1u3tBFA=";
-  cargoBuildFlags = lib.optionals stdenv.isLinux [ "--features fuse_driver" ];
+  cargoBuildFlags = [ "--features fuse_driver" ];
   checkType = "debug";
 
   postPatch = ''
@@ -67,7 +64,6 @@ rustPlatform.buildRustPackage rec {
   meta = with lib; {
     description = "Rapid restore tool for backy";
     license = licenses.bsd3;
-    maintainers = [ maintainers.ckauhaus ];
     platforms = platforms.unix;
   };
 }
