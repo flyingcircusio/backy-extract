@@ -7,7 +7,7 @@ use backy_extract::*;
 use shells::sh;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{prelude::*, SeekFrom};
+use std::io::{SeekFrom, prelude::*};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -37,7 +37,7 @@ impl FuseMount {
         let mnt = tmp.path().join("mnt");
         fs::create_dir(&mnt).unwrap();
         let basedir = tmp.path().to_owned();
-        thread::spawn(move || {
+        tokio::spawn(async move {
             let mountpoint = basedir.join("mnt");
             env_logger::try_init().ok();
             fuse::App {
@@ -47,6 +47,7 @@ impl FuseMount {
                 ..Default::default()
             }
             .run()
+            .await
             .unwrap();
         });
         wait_for_mtab(&mnt);
@@ -61,8 +62,8 @@ impl Drop for FuseMount {
     }
 }
 
-#[test]
-fn read_aligned() {
+#[tokio::test]
+async fn read_aligned() {
     let m = FuseMount::new();
     // readdir should return the only rev present
     let files: Vec<OsString> = fs::read_dir(&m.mnt)
@@ -76,8 +77,8 @@ fn read_aligned() {
     assert_eq!(fs::read(revfile).unwrap(), *common::IMAGE);
 }
 
-#[test]
-fn read_unaligned() {
+#[tokio::test]
+async fn read_unaligned() {
     let m = FuseMount::new();
     let size = 4 << CHUNKSZ_LOG;
     let mut f = File::open(m.mnt.join("VNzWKjnMqd6w58nzJwUZ98")).unwrap();
@@ -100,8 +101,8 @@ fn read_unaligned() {
     assert_eq!(image, *common::IMAGE);
 }
 
-#[test]
-fn write_unaligned() {
+#[tokio::test]
+async fn write_unaligned() {
     let m = FuseMount::new();
     let mut f = OpenOptions::new()
         .write(true)

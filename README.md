@@ -101,6 +101,11 @@ Hacking
 Please create issues and submit pull requests at
 https://github.com/flyingcircusio/backy-extract/.
 
+We provide a Nix shell in `shell.nix` that can be executed with `nix-shell`.
+Then compiling works on both `x86_64-linux` and `aarch64-darwin` with `cargo build --all-features`.
+
+The package definition in `default.nix` is currently only compatible with `x86_64-linux`.
+
 
 Author
 ======

@@ -3,44 +3,49 @@ mod access;
 use self::access::{FuseAccess, FuseDirectory};
 use crate::purgelock;
 
-use anyhow::{Context, Result};
-use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
-};
-use libc::{EINVAL, EIO, ENOENT, ENOTDIR};
+use anyhow::Context;
+use fuse3::raw::prelude::*;
+use fuse3::{Errno, Inode, MountOptions, Result, Timestamp};
+use futures_util::stream;
+use futures_util::stream::Stream;
+use libc;
 use log::{error, info, warn};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 use structopt::StructOpt;
-use time::Timespec;
 
-static TTL: Timespec = Timespec { sec: 1, nsec: 1 };
-
-static UNIX_EPOCH: Timespec = Timespec { sec: 0, nsec: 0 };
+const TTL: Duration = Duration::from_secs(1);
+const BLOCK_SIZE: u32 = 512;
 
 static ROOT_NODE: FileAttr = FileAttr {
     ino: 1,
     size: 0,
     blocks: 0,
-    atime: UNIX_EPOCH,
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
+    atime: Timestamp { sec: 0, nsec: 0 },
+    mtime: Timestamp { sec: 0, nsec: 0 },
+    ctime: Timestamp { sec: 0, nsec: 0 },
     kind: FileType::Directory,
     perm: 0o0755,
     nlink: 2,
     uid: 0,
     gid: 0,
     rdev: 0,
+    blksize: BLOCK_SIZE,
+    #[cfg(target_os = "macos")]
+    crtime: Timestamp { sec: 0, nsec: 0 },
+    #[cfg(target_os = "macos")]
     flags: 0,
 };
 
 fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
-    let timestamp = Timespec::new(entry.rev.timestamp.timestamp(), 0);
+    let timestamp: Timestamp = Into::<SystemTime>::into(entry.rev.timestamp).into();
+
     FileAttr {
         ino,
         size: entry.size,
@@ -48,61 +53,85 @@ fn fileattr(ino: u64, entry: &FuseAccess) -> FileAttr {
         atime: timestamp,
         mtime: timestamp,
         ctime: timestamp,
-        crtime: timestamp,
         kind: FileType::RegularFile,
         perm: 0o0644,
         nlink: 1,
         uid: 0,
         gid: 0,
         rdev: 0,
+        blksize: BLOCK_SIZE,
+        #[cfg(target_os = "macos")]
+        crtime: timestamp,
+        #[cfg(target_os = "macos")]
         flags: 0,
     }
 }
 
 struct BackyFs {
-    dir: FuseDirectory,
+    dir: Mutex<FuseDirectory>,
     reverse: HashMap<OsString, u64>,
 }
 
 impl BackyFs {
-    fn init<P: AsRef<Path>>(dir: P, cache_size: usize) -> Result<Self> {
+    fn init<P: AsRef<Path>>(dir: P, cache_size: usize) -> anyhow::Result<Self> {
         let dir = FuseDirectory::init(dir, cache_size)?;
         let mut reverse = HashMap::new();
         for (ino, entry) in dir.iter() {
             reverse.insert(entry.name.to_owned(), *ino);
         }
-        Ok(Self { dir, reverse })
+        Ok(Self {
+            dir: Mutex::new(dir),
+            reverse,
+        })
     }
 }
 
-macro_rules! reject_node1(
-    ($op:expr, $ino:expr, $reply:expr) => {
-        if $ino == FUSE_ROOT_ID {
+macro_rules! reject_node1 {
+    ($op:expr, $ino:expr) => {
+        if $ino == 1 {
             error!("{}: trying to access directory as regular file", $op);
-            $reply.error(EINVAL);
-            return;
+            return Err(Errno::from(libc::EINVAL));
         }
-    }
-);
+    };
+}
 
 impl Filesystem for BackyFs {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, re: ReplyEntry) {
-        if parent != FUSE_ROOT_ID {
+    async fn init(&self, _req: Request) -> Result<ReplyInit> {
+        Ok(ReplyInit::new(NonZeroU32::new(16 * 1024).unwrap()))
+    }
+
+    async fn destroy(&self, _req: Request) {}
+
+    async fn lookup(&self, _req: Request, parent: Inode, name: &OsStr) -> Result<ReplyEntry> {
+        let mut dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+
+        if parent != 1 {
             warn!("lookup(): trying to use an invalid base directory");
-            re.error(ENOENT);
-            return;
+            return Err(Errno::from(libc::ENOENT));
         }
+
         if name == "." || name == ".." {
-            re.entry(&TTL, &ROOT_NODE, 0);
+            Ok(ReplyEntry {
+                ttl: TTL,
+                attr: ROOT_NODE,
+                generation: 0,
+            })
         } else {
             let path = PathBuf::from(name);
             if let Some(ino) = self.reverse.get(name) {
-                if let Some(entry) = self.dir.get_mut(ino) {
+                if let Some(entry) = dir_guard.get_mut(ino) {
                     match entry.load_if_empty() {
-                        Ok(_) => re.entry(&TTL, &fileattr(*ino, entry), 0),
+                        Ok(_) => Ok(ReplyEntry {
+                            ttl: TTL,
+                            attr: fileattr(*ino, entry),
+                            generation: 0,
+                        }),
                         Err(e) => {
                             error!("lookup({:?}): {}", name, e);
-                            re.error(EINVAL);
+                            Err(Errno::from(libc::EINVAL))
                         }
                     }
                 } else {
@@ -113,164 +142,273 @@ impl Filesystem for BackyFs {
                 }
             } else {
                 info!("lookup(): '{}' not found", path.display());
-                re.error(ENOENT);
+                Err(Errno::from(libc::ENOENT))
             }
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, re: ReplyAttr) {
-        if ino == 1 {
-            re.attr(&TTL, &ROOT_NODE);
-            return;
+    async fn getattr(
+        &self,
+        _req: Request,
+        inode: Inode,
+        _fh: Option<u64>,
+        _flags: u32,
+    ) -> Result<ReplyAttr> {
+        let dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+
+        if inode == 1 {
+            return Ok(ReplyAttr {
+                ttl: TTL,
+                attr: ROOT_NODE,
+            });
         }
-        if let Some(entry) = self.dir.get(&ino) {
-            re.attr(&TTL, &fileattr(ino, entry));
+
+        if let Some(entry) = dir_guard.get(&inode) {
+            Ok(ReplyAttr {
+                ttl: TTL,
+                attr: fileattr(inode, entry),
+            })
         } else {
-            error!("getattr(): cannot find inode {}", ino);
-            re.error(ENOENT);
+            error!("getattr(): cannot find inode {}", inode);
+            Err(Errno::from(libc::ENOENT))
         }
     }
 
-    fn readdir(&mut self, _r: &Request, ino: u64, _fh: u64, off: i64, mut re: ReplyDirectory) {
-        if ino != FUSE_ROOT_ID {
-            error!("readdir() failed - inode {} is not a directory", ino);
-            re.error(ENOTDIR);
-            return;
+    async fn readdir(
+        &self,
+        _req: Request,
+        inode: Inode,
+        _fh: u64,
+        offset: i64,
+    ) -> Result<ReplyDirectory<impl Stream<Item = Result<DirectoryEntry>> + Send + '_>> {
+        let dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+
+        if inode != 1 {
+            error!("readdir() failed - inode {} is not a directory", inode);
+            return Err(Errno::from(libc::ENOTDIR));
         }
-        if off == 0 {
-            re.add(FUSE_ROOT_ID, 1, FileType::Directory, ".");
-            re.add(FUSE_ROOT_ID, 2, FileType::Directory, "..");
+
+        let mut entries = Vec::new();
+
+        // Standard FUSE entries: . and ..
+        if offset == 0 {
+            entries.push(Ok(DirectoryEntry {
+                inode: 1,
+                kind: FileType::Directory,
+                name: OsString::from("."),
+                offset: 1,
+            }));
+            entries.push(Ok(DirectoryEntry {
+                inode: 1,
+                kind: FileType::Directory,
+                name: OsString::from(".."),
+                offset: 2,
+            }));
         }
-        if off < (self.dir.len() as i64) + 2 {
-            for (n, (ino, entry)) in self.dir.iter().enumerate().skip((off - 2).max(0) as usize) {
-                re.add(*ino, (n + 3) as i64, FileType::RegularFile, &entry.name);
+
+        // XXX: Consider simplifying
+        if offset < (dir_guard.len() as i64) + 2 {
+            for (n, (inode, entry)) in dir_guard
+                .iter()
+                .enumerate()
+                .skip((offset - 2).max(0) as usize)
+            {
+                entries.push(Ok(DirectoryEntry {
+                    inode: *inode,
+                    offset: (n + 3) as i64,
+                    kind: FileType::RegularFile,
+                    name: entry.name.clone(),
+                }))
             }
         }
-        re.ok()
+
+        // Create a stream from the vector and box-pin it to satisfy trait bounds
+        let stream = Box::pin(stream::iter(entries));
+
+        Ok(ReplyDirectory { entries: stream })
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, _flags: u32, re: ReplyOpen) {
-        reject_node1!("open", ino, re);
-        if let Some(entry) = self.dir.get_mut(&ino) {
+    async fn open(&self, _req: Request, inode: Inode, _flags: u32) -> Result<ReplyOpen> {
+        reject_node1!("open", inode);
+        let mut dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+
+        if let Some(entry) = dir_guard.get_mut(&inode) {
             match entry.load_if_empty() {
-                Ok(_) => re.opened(0, 0),
+                Ok(_) => Ok(ReplyOpen { fh: 0, flags: 0 }),
                 Err(e) => {
-                    error!("open(0x{:x}: {}", ino, e);
-                    re.error(EINVAL);
+                    error!("open(0x{:x}): {}", inode, e);
+                    Err(Errno::from(libc::EINVAL))
                 }
             }
         } else {
-            info!("open(0x{:x}): not found", ino);
-            re.error(ENOENT);
+            info!("open(0x{:x}): not found", inode);
+            Err(Errno::from(libc::ENOENT))
         }
     }
 
-    fn release(
-        &mut self,
-        _req: &Request,
-        ino: u64,
+    async fn release(
+        &self,
+        _req: Request,
+        inode: Inode,
         _fh: u64,
-        _fl: u32,
-        _owner: u64,
+        _flags: u32,
+        _lock_owner: u64,
         _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        if let Some(entry) = self.dir.get_mut(&ino) {
+    ) -> Result<()> {
+        let mut dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+        if let Some(entry) = dir_guard.get_mut(&inode) {
             entry.cleanup();
-            reply.ok();
         }
+        Ok(())
     }
 
-    fn read(&mut self, _r: &Request, ino: u64, _fh: u64, off: i64, size: u32, re: ReplyData) {
-        reject_node1!("read", ino, re);
-        if let Some(entry) = self.dir.get_mut(&ino) {
-            let off: usize = off.try_into().unwrap();
-            let size = size as usize;
-            let data = match entry.read_at(off as u64, size) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("read(0x{:x} @ {}): {}", ino, off, e);
-                    return re.error(EIO);
+    async fn read(
+        &self,
+        _r: Request,
+        inode: Inode,
+        _fh: u64,
+        offset: u64,
+        size: u32,
+    ) -> Result<ReplyData> {
+        reject_node1!("read", inode);
+
+        let offset_usize: usize = offset.try_into().unwrap();
+        let size_usize = size as usize;
+        let mut buf;
+
+        {
+            let mut dir_guard = match self.dir.lock() {
+                Ok(guard) => guard,
+                Err(_) => return Err(Errno::from(libc::EIO)),
+            };
+
+            let entry = match dir_guard.get_mut(&inode) {
+                Some(e) => e,
+                None => {
+                    info!("read(0x{:x}): not found", inode);
+                    return Err(Errno::from(libc::ENOENT));
                 }
             };
-            if data.len() >= size || data.is_empty() {
-                // fast path: read_at gave us all at once
-                return re.data(data);
-            }
-            let mut buf = Vec::with_capacity(size);
-            buf.extend_from_slice(data);
-            while buf.len() < size {
-                buf.extend_from_slice(
-                    match entry.read_at((off + buf.len()) as u64, size - buf.len()) {
+
+            let first_data = match entry.read_at(offset, size_usize) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("read(0x{:x} @ {}): {}", inode, offset, e);
+                    return Err(Errno::from(libc::ENOENT));
+                }
+            };
+
+            if first_data.len() >= size_usize || first_data.is_empty() {
+                // fast path: read_at gave us all data at once
+                buf = first_data.to_vec();
+            } else {
+                buf = Vec::with_capacity(size_usize);
+                buf.extend_from_slice(first_data);
+                while buf.len() < size_usize {
+                    let slice = match entry
+                        .read_at((offset_usize + buf.len()) as u64, size_usize - buf.len())
+                    {
+                        Ok([]) => break, // reached EOF
                         Ok(data) => data,
                         Err(e) => {
-                            error!("read(0x{:x} @ {}): {}", ino, off, e);
-                            return re.error(EIO);
+                            error!("read(0x{:x} @ {}): {}", inode, offset, e);
+                            return Err(Errno::from(libc::EIO));
                         }
-                    },
-                );
+                    };
+                    buf.extend_from_slice(slice);
+                }
             }
-            re.data(&buf);
-        } else {
-            info!("read(0x{:x}): not found", ino);
-            re.error(ENOENT);
+            Ok(ReplyData { data: buf.into() })
         }
     }
 
-    fn write(
-        &mut self,
-        _r: &Request,
-        ino: u64,
+    async fn write(
+        &self,
+        _req: Request,
+        inode: Inode,
         _fh: u64,
-        off: i64,
+        offset: u64,
         data: &[u8],
+        _write_flags: u32,
         _flags: u32,
-        re: ReplyWrite,
-    ) {
-        reject_node1!("write", ino, re);
-        if let Some(entry) = self.dir.get_mut(&ino) {
-            match entry.write_at(off.try_into().unwrap(), &data) {
-                Ok(n) if n == data.len() => re.written(n.try_into().unwrap()),
-                Ok(n) => {
-                    error!(
-                        "write(0x{:x} @ {}): short write ({} of {})",
-                        ino,
-                        off,
-                        n,
-                        data.len()
-                    );
-                    re.error(EIO);
-                }
-                Err(e) => {
-                    error!("write(0x{:x} @ {}): {}", ino, off, e);
-                    re.error(EIO);
+    ) -> Result<ReplyWrite> {
+        reject_node1!("write", inode);
+        let mut dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Errno::from(libc::EIO)),
+        };
+
+        if let Some(entry) = dir_guard.get_mut(&inode) {
+            let mut total_written = 0;
+
+            // Loop because we get lager write data than write_at can process
+            while total_written < data.len() {
+                let current_offset = offset + total_written as u64;
+                let remaining_data = &data[total_written..];
+
+                match entry.write_at(current_offset, remaining_data) {
+                    Ok(0) => {
+                        // 0 bytes written without an error means a stall or unexpected EOF
+                        error!(
+                            "write(0x{:x} @ {}): unexpected zero-length write progress",
+                            inode, current_offset
+                        );
+                        return Err(Errno::from(libc::EIO));
+                    }
+                    Ok(n) => {
+                        total_written += n;
+                    }
+                    Err(e) => {
+                        error!("write(0x{:x} @ {}): {}", inode, current_offset, e);
+                        return Err(Errno::from(libc::EIO));
+                    }
                 }
             }
+
+            Ok(ReplyWrite {
+                written: total_written.try_into().unwrap(),
+            })
         } else {
-            info!("write(0x{:x}): not found", ino);
-            re.error(ENOENT);
+            info!("write(0x{:x}): not found", inode);
+            Err(Errno::from(libc::ENOENT))
         }
     }
 
-    fn statfs(&mut self, _r: &Request, _ino: u64, re: ReplyStatfs) {
-        let total: u64 = self
-            .dir
+    async fn statfs(&self, _r: Request, _ino: Inode) -> Result<ReplyStatFs> {
+        let mut dir_guard = match self.dir.lock() {
+            Ok(guard) => guard,
+            Err(_err) => return Err(Errno::from(libc::EIO)),
+        };
+        let total: u64 = dir_guard
             .values_mut()
             .map(|fa| {
                 fa.load_if_empty().ok();
                 fa.size
             })
             .sum();
-        re.statfs(
-            (total + 4095) / 4096,     // blocks
-            0,                         // bfree
-            0,                         // bavail
-            self.dir.len() as u64 + 2, // files
-            0,                         // ffree
-            4096,                      // bsize
-            1024,                      // namelen
-            4096,                      // fragment size
-        )
+
+        Ok(ReplyStatFs {
+            blocks: (total + 4095) / 4096,
+            bfree: 0,
+            bavail: 0,
+            files: dir_guard.len() as u64 + 2,
+            ffree: 0,
+            bsize: 4096,
+            namelen: 1024,
+            frsize: 4096,
+        })
     }
 }
 
@@ -289,12 +427,7 @@ pub struct App {
     ///
     /// See fuse(8) for possible values. Accepts multiple comma-separated
     /// values
-    #[structopt(
-        short = "o",
-        long,
-        value_name = "OPTIONS",
-        default_value = "allow_root"
-    )]
+    #[structopt(short = "o", long, value_name = "OPTIONS", default_value = "")]
     pub mountopts: Vec<String>,
     /// Size of the chunk caches in MiB
     #[structopt(short, long, value_name = "SIZE", default_value = "1024")]
@@ -305,23 +438,27 @@ pub struct App {
 }
 
 impl App {
-    pub fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> anyhow::Result<()> {
         let lock = purgelock(&self.basedir).context("Failed to acquire .purge lock")?;
         info!("Loading revisions");
         let fs = BackyFs::init(&self.basedir, max(self.cache, 16) << 20)?;
         println!(
-            "Mounting FUSE fileystem... unmount with: fusermount -u '{}'",
+            "Mounting FUSE fileystem... unmount with: fusermount3 -u '{}'",
             self.mountpoint.display()
         );
-        fuse::mount(
-            fs,
-            &self.mountpoint,
-            &[&OsStr::new(&format!(
-                "-ofsname=backy,{}",
-                self.mountopts.join(",")
-            ))],
-        )
-        .context("Failed to mount FUSE filesystem")?;
+
+        let mut mount_options = MountOptions::default();
+        mount_options
+            .fs_name("backy")
+            .custom_options(self.mountopts.join(","));
+
+        Session::new(mount_options)
+            .mount(fs, &self.mountpoint)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
         drop(lock);
         Ok(())
     }

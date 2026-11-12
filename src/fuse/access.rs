@@ -2,7 +2,7 @@
 
 use crate::backend::{self, Backend, Rev, RevError};
 use crate::chunkvec::{ChunkId, RevisionMap};
-use crate::{pos2chunk, CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK};
+use crate::{CHUNKSZ, CHUNKSZ_LOG, ZERO_CHUNK, pos2chunk};
 
 use fnv::FnvHashMap as HashMap;
 use log::{debug, info};
@@ -15,7 +15,7 @@ use std::fs;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
@@ -52,7 +52,7 @@ type Chunks = Vec<Option<ChunkId>>;
 
 #[derive(Clone)]
 struct Page {
-    data: Rc<Vec<u8>>,
+    data: Arc<Vec<u8>>,
     seq: u32,
 }
 
@@ -77,7 +77,7 @@ impl Page {
     #[cfg(test)]
     fn new(data: Vec<u8>, seq: u32) -> Self {
         Self {
-            data: Rc::new(data),
+            data: Arc::new(data),
             seq,
         }
     }
@@ -87,7 +87,7 @@ impl Page {
     /// The page gets copied before writing if other pages are around.
     fn update(&mut self, off: usize, new: &[u8]) {
         assert!(off + new.len() <= CHUNKSZ, "Page update exceeds page size");
-        Rc::make_mut(&mut self.data)[off..off + new.len()].clone_from_slice(new);
+        Arc::make_mut(&mut self.data)[off..off + new.len()].clone_from_slice(new);
     }
 
     fn set_seq(mut self, seq: u32) -> Self {
@@ -128,7 +128,7 @@ impl Default for Page {
     }
 }
 impl Deref for Page {
-    type Target = Rc<Vec<u8>>;
+    type Target = Arc<Vec<u8>>;
 
     fn deref(&self) -> &Self::Target {
         &self.data
@@ -381,7 +381,7 @@ mod test {
     use super::*;
     use crate::chunkvec::ChunkId;
     use crate::test_helper::*;
-    use crate::{chunk2pos, CHUNKSZ_LOG};
+    use crate::{CHUNKSZ_LOG, chunk2pos};
     use backend::RevId;
 
     use chrono::{TimeZone, Utc};

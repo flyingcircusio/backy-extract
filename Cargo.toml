@@ -1,8 +1,11 @@
 [package]
 name = "backy-extract"
 version = "1.1.0"
-authors = ["Christian Kauhaus <christian@kauhaus.de>"]
-edition = "2018"
+authors = [
+    "Flying Circus Internet Operations GmbH <mail@flyingcircus.io",
+    "Christian Kauhaus <christian@kauhaus.de>"
+]
+edition = "2024"
 description = "Rapid restore tool for backy"
 license = "BSD-3-Clause"
 repository = "https://github.com/flyingcircusio/backy-extract"
@@ -18,7 +21,7 @@ crossbeam = "0.8"
 env_logger = "0.7"
 fnv = "1"
 fs2 = "0.4"
-fuse = { version = "0.3", optional = true }
+fuse3 = { version = "0.10", features = ["tokio-runtime"], optional = true }
 hex = { version = "0.4.3", optional = true }
 indicatif = "0.17"
 lazy_static = "1.2"
@@ -38,10 +41,16 @@ smallvec = "0.6"
 structopt = "0.3"
 thiserror = "1"
 time = { version = "0.1", optional = true }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+futures-util = "0.3.34"
 
 [features]
 default = []
-fuse_driver = ["fuse", "time", "murmur3", "hex"]
+fuse_driver = ["fuse3", "time", "murmur3", "hex"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fuse3 = { version = "0.10", features = ["tokio-runtime", "unprivileged"] }
+nix = { version = "0.31.2", default-features = false, features = ["fs", "mount", "user", "socket"] }
 
 [[bin]]
 name = "backy-fuse"
